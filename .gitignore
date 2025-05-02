@@ -1,4 +1,6 @@
 .cache/
+.DS_Store
+
 __pycache__/
 checkpoints/
 data/train/
