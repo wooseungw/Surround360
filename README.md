@@ -25,5 +25,5 @@ pip install torch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1 --index-url https
 #### Install HuggingFace
 ```
 pip install transformers==4.51.3
-pip install datasets
+pip install datasets==3.5.1
 ```
