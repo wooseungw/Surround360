@@ -2,6 +2,7 @@ import torch
 from torch import nn
 from transformers import Blip2VisionModel, Blip2QFormerModel
 from transformers import Blip2Processor, Blip2ForConditionalGeneration
+from transformers import BlipImageProcessor, BlipTextProcessor
 from transformers import Blip2Config
 from transformers import AutoModelForCausalLM, AutoModelForSeq2SeqLM
 
@@ -40,3 +41,4 @@ from transformers import AutoModelForCausalLM, AutoModelForSeq2SeqLM
 
 #         # Initialize weights and apply final processing
 #         self.post_init()
+
