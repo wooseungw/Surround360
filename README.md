@@ -3,8 +3,7 @@
 ## Setup Env
 ``` bash
 conda create -n sur python=3.12 -y
-conda activate sur
-pip install 
+conda activate sur 
 ```
 ### Install Torch
 #### Mac OS 
