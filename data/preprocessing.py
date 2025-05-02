@@ -36,6 +36,7 @@ def transform_batch(batch):
         w, h = img.size
         new_h = PATCH_SIZE
         new_w = int(w * (new_h / h))
+        print("리사이즈 전:", img.size, "-> 리사이즈 후:", (new_w, new_h))
         img_r = img.resize((new_w, new_h), Image.BILINEAR)
 
         # 3) 슬라이딩 크롭
