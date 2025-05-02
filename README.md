@@ -22,7 +22,8 @@ pip install torch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1 --index-url https
 # CPU only
 pip install torch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1 --index-url https://download.pytorch.org/whl/cpu
 ```
-#### Install Requirements
+#### Install HuggingFace
 ```
 pip install git+https://github.com/huggingface/transformers@4.52.0.dev0
+pip install datasets
 ```
