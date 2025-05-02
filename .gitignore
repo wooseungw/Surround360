@@ -1,5 +1,6 @@
+.cahce/
 __pycache__/
 checkpoints/
 data/train/
-.cahce/
 data/raw/
+
