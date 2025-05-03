@@ -21,7 +21,7 @@ import torchvision.datasets as datasets
 import augmentations as aug
 from distributed import init_distributed_mode
 
-import resnet
+# import resnet
 
 # @inproceedings{bardes2022vicreg,
 #   author  = {Adrien Bardes and Jean Ponce and Yann LeCun},

@@ -1,0 +1,36 @@
+# wandb 설정
+wandb:
+    project: "Surround360"
+    name: "blip2_360_training"
+    # 모델 설정
+model:
+    name: "Salesforce/blip2-opt-2.7b" # 또는 다른 BLIP-2 모델 버전
+    fp16: true
+    save_dir: "saved_models/blip2_360"
+    # 프로페서 설정
+professor:
+    name: "Salesforce/blip2-opt-2.7b" # 또는 다른 BLIP-2 모델 버전
+    do_crop: False
+    # 데이터 설정
+data:
+    dir: "data/raw/QuIC360"
+    train_file: "train.csv"
+    valid_file: "valid.csv"
+    image_size: [ 224, 224 ]
+    max_length: 30
+    # 학습 설정
+training:
+    output_dir: "outputs/blip2_360"
+    num_epochs: 5
+    batch_size:
+        train: 8
+        eval: 16
+    warmup_steps: 500
+    weight_decay: 0.01
+    logging_dir: "logs/blip2_360"
+    logging_steps: 100
+    evaluation_strategy: "epoch"
+    save_strategy: "epoch"
+    load_best_model_at_end: true
+    report_to: "wandb"
+    fp16: true

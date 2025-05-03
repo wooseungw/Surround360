@@ -3,6 +3,7 @@ from typing import Dict, List, Optional, Union
 def validate_preprocess_arguments(
     do_rescale: Optional[bool] = None,
     do_crop: Optional[bool] = None,
+    fov: Optional[float] = None,
     overlap_ratio: Optional[float] = None,
     rescale_factor: Optional[float] = None,
     do_normalize: Optional[bool] = None,

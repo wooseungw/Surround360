@@ -63,6 +63,36 @@ def transform_batch(batch):
 # 실시간 transform 설정
 ds = ds.with_transform(transform_batch)
 
+
+from py360convert import e2p
+
+# arrays: List[np.ndarray], 각각 shape (H, W, C), dtype=uint8 또는 float
+def rectify_batch(arrays, fov_deg=90, theta=0, phi=0, height=512, width=512):
+    rectified = []
+    for arr in arrays:
+        # e2p는 (H, W, C) uint8 또는 float 입력을 바로 받습니다.
+        persp = e2p(
+            arr,
+            fov_deg=fov_deg,
+            u_divs=width,
+            v_divs=height,
+            theta_deg=theta,
+            phi_deg=phi,
+            roll_deg=0,
+        )
+        rectified.append(persp)
+    return rectified
+
+# 사용 예
+rectified_images = rectify_batch(
+    arrays=your_numpy_images,
+    fov_deg=90,
+    theta=0,   # 필요에 따라 조정
+    phi=0,
+    height=512,
+    width=512
+)
+
 #Test Code
 if __name__ == "__main__":
     # DataLoader (batch_size=1)
