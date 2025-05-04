@@ -2,14 +2,11 @@
 
 ## Setup Env
 ``` bash
-conda create -n sur python=3.12 -y
+conda create -n sur python=3.11 -y
 conda activate sur 
 ```
 ### Install Torch
-#### Mac OS 
-``` 
-pip install torch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1
-```
+
 #### Linux or Window
 ``` 
 # ROCM 6.0 (Linux only)
@@ -21,13 +18,27 @@ pip install torch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1 --index-url https
 # CPU only
 pip install torch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1 --index-url https://download.pytorch.org/whl/cpu
 ```
-#### Install DeepSpeed(Windows)
+#### Mac OS 
+``` 
+pip install torch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1
+```
+
+#### Install DeepSpeed(Windows, Not recommended)
 ```
 pip install https://github.com/daswer123/deepspeed-windows/releases/download/13.1/deepspeed-0.13.1+cu121-cp311-cp311-win_amd64.whl
-
-
 ```
 #### Install Requirements
 ```
 pip install -r requirements.txt
+```
+#### Install Surround360
+```
+pip install transformers==4.51.3
+pip install 
+pip install deepspeed
+conda install -y -c conda-forge cuda-nvcc=12.1
+conda install -y -c conda-forge cudatoolkit-dev
+pip install flash_attn==2.3.4
+pip install git+https://github.com/jmhessel/pycocoevalcap.git@f76c47defb8eb646545147f913b7023bbfcfcabe
+pip install openai-clip==1.0.1
 ```
