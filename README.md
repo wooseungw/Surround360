@@ -21,6 +21,12 @@ pip install torch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1 --index-url https
 # CPU only
 pip install torch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1 --index-url https://download.pytorch.org/whl/cpu
 ```
+#### Install DeepSpeed(Windows)
+```
+pip install https://github.com/daswer123/deepspeed-windows/releases/download/13.1/deepspeed-0.13.1+cu121-cp311-cp311-win_amd64.whl
+
+
+```
 #### Install Requirements
 ```
 pip install -r requirements.txt

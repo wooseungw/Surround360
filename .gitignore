@@ -1,8 +1,9 @@
 .cache/
 .DS_Store
 
+wandb/
 __pycache__/
 checkpoints/
-data/train/
+data/quic360/
 data/raw/
 
