@@ -1,5 +1,5 @@
 {
-    "gradient_accumulation_steps": 4,
+    "gradient_accumulation_steps": "auto",
     "zero_optimization": {
       "stage": 2,
       "offload_optimizer": {

@@ -138,41 +138,46 @@ def data_collator(features):
     
     return batch
 
+import torch
+import clip
+
 class CLIPScorer:
     def __init__(self, device):
         self.device = device
+        # 모델 로드 후 평가 모드로 전환하고, 파라미터에 grad 비활성화
         self.model, self.preprocess = clip.load("ViT-B/32", device=device)
-        
+        self.model.eval()
+        for p in self.model.parameters():
+            p.requires_grad = False
+
+    @torch.no_grad()
     def compute_clip_score(self, images, texts):
-        """Calculate CLIP-S score"""
+        """Calculate CLIP-S score without computing gradients"""
         image_features = self.model.encode_image(images)
-        text_features = self.model.encode_text(texts)
-        
-        # Normalize features
+        text_features  = self.model.encode_text(texts)
+        # Normalize
         image_features = image_features / image_features.norm(dim=1, keepdim=True)
-        text_features = text_features / text_features.norm(dim=1, keepdim=True)
-        
+        text_features  = text_features  / text_features.norm(dim=1, keepdim=True)
         # Cosine similarity
         similarity = (image_features @ text_features.T).squeeze()
         return similarity.mean().item()
-    
+
+    @torch.no_grad()
     def compute_refclip_score(self, images, candidates, references):
-        """Calculate RefCLIP-S score"""
-        image_features = self.model.encode_image(images)
+        """Calculate RefCLIP-S score without computing gradients"""
+        image_features     = self.model.encode_image(images)
         candidate_features = self.model.encode_text(candidates)
         reference_features = self.model.encode_text(references)
-        
-        # Normalize features
-        image_features = image_features / image_features.norm(dim=1, keepdim=True)
+        # Normalize
+        image_features     = image_features     / image_features.norm(dim=1, keepdim=True)
         candidate_features = candidate_features / candidate_features.norm(dim=1, keepdim=True)
         reference_features = reference_features / reference_features.norm(dim=1, keepdim=True)
-        
         # RefCLIP-S score
-        candidate_similarity = (image_features @ candidate_features.T).squeeze()
-        reference_similarity = (candidate_features @ reference_features.T).squeeze()
-        
-        refclip_score = (candidate_similarity + reference_similarity) / 2
+        c_sim = (image_features @ candidate_features.T).squeeze()
+        r_sim = (candidate_features @ reference_features.T).squeeze()
+        refclip_score = (c_sim + r_sim) / 2
         return refclip_score.mean().item()
+
 
 def compute_metrics(eval_pred, processor, clip_scorer):
     predictions, labels = eval_pred
