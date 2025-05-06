@@ -5,8 +5,9 @@ wandb:
 
 # 모델 설정
 model:
-    name: "Salesforce/blip2-opt-2.7b"
+    name: "Salesforce/blip2-flan-t5-xl"
     save_dir: "saved_models/blip2_360"
+    max_new_tokens: 256 # 최대 생성 토큰 수
 
 # 데이터 설정
 data:
@@ -14,7 +15,7 @@ data:
     train_file: "train.csv"
     valid_file: "valid.csv"
     image_size: [ 224, 224 ]
-    max_length: 30
+    max_length: 256
     do_crop: false
     overlap_ratio: 0.5
 

@@ -68,17 +68,18 @@ class QuIC360Dataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, Union[torch.Tensor, str]]:
         # 이미지 경로와 질문, 정답을 가져옵니다.
         image_path = self.df.iloc[idx]["url"]
-        question = self.df.iloc[idx]["query"]
-        answer = self.df.iloc[idx]["annotation"]
+        question = str(self.df.iloc[idx]["query"])
+        answer = str(self.df.iloc[idx]["annotation"])
+        
         
         # 이미지를 로드합니다.
         image = Image.open(image_path).convert("RGB")
-        
+        qtext = f"Question: {question} Answer:"
         # 질문과 정답을 전처리합니다.
         inputs = self.processor(
-            text=question,
+            text=qtext,
             images=image,
-            image_size=self.image_size,
+            # image_size=self.image_size,
             return_tensors="pt",
             max_length=self.max_length,
             padding="max_length",
@@ -138,87 +139,6 @@ def data_collator(features):
     
     return batch
 
-import torch
-import clip
-
-class CLIPScorer:
-    def __init__(self, device):
-        self.device = device
-        # 모델 로드 후 평가 모드로 전환하고, 파라미터에 grad 비활성화
-        self.model, self.preprocess = clip.load("ViT-B/32", device=device)
-        self.model.eval()
-        for p in self.model.parameters():
-            p.requires_grad = False
-
-    @torch.no_grad()
-    def compute_clip_score(self, images, texts):
-        """Calculate CLIP-S score without computing gradients"""
-        image_features = self.model.encode_image(images)
-        text_features  = self.model.encode_text(texts)
-        # Normalize
-        image_features = image_features / image_features.norm(dim=1, keepdim=True)
-        text_features  = text_features  / text_features.norm(dim=1, keepdim=True)
-        # Cosine similarity
-        similarity = (image_features @ text_features.T).squeeze()
-        return similarity.mean().item()
-
-    @torch.no_grad()
-    def compute_refclip_score(self, images, candidates, references):
-        """Calculate RefCLIP-S score without computing gradients"""
-        image_features     = self.model.encode_image(images)
-        candidate_features = self.model.encode_text(candidates)
-        reference_features = self.model.encode_text(references)
-        # Normalize
-        image_features     = image_features     / image_features.norm(dim=1, keepdim=True)
-        candidate_features = candidate_features / candidate_features.norm(dim=1, keepdim=True)
-        reference_features = reference_features / reference_features.norm(dim=1, keepdim=True)
-        # RefCLIP-S score
-        c_sim = (image_features @ candidate_features.T).squeeze()
-        r_sim = (candidate_features @ reference_features.T).squeeze()
-        refclip_score = (c_sim + r_sim) / 2
-        return refclip_score.mean().item()
-
-
-def compute_metrics(eval_pred, processor, clip_scorer):
-    predictions, labels = eval_pred
-    
-    # Decode predictions and labels
-    decoded_preds = processor.batch_decode(predictions, skip_special_tokens=True)
-    decoded_labels = processor.batch_decode(labels, skip_special_tokens=True)
-    
-    # Initialize scorers
-    bleu_scorer = Bleu(4)
-    meteor_scorer = Meteor()
-    rouge_scorer = Rouge()
-    cider_scorer = Cider()
-    spice_scorer = Spice()
-    
-    # Format for pycocoevalcap
-    gts = {i: [label] for i, label in enumerate(decoded_labels)}
-    res = {i: [pred] for i, pred in enumerate(decoded_preds)}
-    
-    # Calculate scores
-    bleu_score, _ = bleu_scorer.compute_score(gts, res)
-    meteor_score, _ = meteor_scorer.compute_score(gts, res)
-    rouge_score, _ = rouge_scorer.compute_score(gts, res)
-    cider_score, _ = cider_scorer.compute_score(gts, res)
-    spice_score, _ = spice_scorer.compute_score(gts, res)
-    
-    # CLIP scores - would need images which aren't available in this context
-    # This is a placeholder - in actual implementation, you'd need to pass images
-    clip_s = 0.0
-    refclip_s = 0.0
-    
-    return {
-        "bleu4": bleu_score[3],  # BLEU-4
-        "meteor": meteor_score,
-        "rouge_l": rouge_score,
-        "cider": cider_score,
-        "spice": spice_score,
-        "clip_s": clip_s,
-        "refclip_s": refclip_s
-    }
-
 def main():
     args = parse_args()
     config = load_config(args.config)
@@ -244,21 +164,17 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     
-    # CLIP scorer for evaluation
-    clip_scorer = CLIPScorer(device)
-    
     # 데이터셋 경로 설정
     data_dir = Path(config['data']['dir'])
     
     # 데이터셋 및 데이터로더 초기화
     image_size = tuple(config['data']['image_size'])
-    max_length = config['data']['max_length']
     print("train_file:", data_dir/config['data']['train_file'])
     print("valid_file:", data_dir/config['data']['valid_file'])
     train_dataset = QuIC360Dataset(
         data_dir/config['data']['train_file'], 
         processor, 
-        max_length=max_length, 
+        max_length=config['data']['max_length'],
         split="train",
         image_size=image_size,
         do_crop=config['data']['do_crop'],
@@ -268,7 +184,7 @@ def main():
     eval_dataset = QuIC360Dataset(
         data_dir/config['data']['valid_file'], 
         processor, 
-        max_length=max_length, 
+        max_length=config['data']['max_length'],
         split="valid",
         image_size=image_size,
         do_crop=config['data']['do_crop'],
@@ -304,10 +220,7 @@ def main():
         deepspeed=config['deepspeed']['config'] if config['deepspeed']['enabled'] else None,
         report_to=config['training']['report_to'],
     )
-    
-    # Compute metrics function with processor and clip_scorer
-    def compute_metrics_wrapper(eval_pred):
-        return compute_metrics(eval_pred, processor, clip_scorer)
+
     # 트레이너 초기화
     trainer = Trainer(
         model=model,
@@ -315,7 +228,7 @@ def main():
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         data_collator=data_collator,
-        compute_metrics=compute_metrics_wrapper,
+        # compute_metrics=compute_metrics_wrapper,
     )
   
     trainer.train()
