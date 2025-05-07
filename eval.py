@@ -82,7 +82,6 @@ class EvalDataset(Dataset):
         pixel_values   = inputs.pixel_values.squeeze(0)    # [3, H, W]
         input_ids       = inputs.input_ids.squeeze(0)      # [L]
         attention_mask  = inputs.attention_mask.squeeze(0) # [L]
-        print(f"pixel_values shape: {pixel_values.shape}")
         return {
             "pixel_values":   pixel_values,
             "input_ids":      input_ids,
@@ -207,8 +206,6 @@ def main():
     # 평가 루프
     for batch in tqdm(dataloader, desc="Evaluating"):
         pv   = batch["pixel_values"].to(device)
-        # add patch dimension for SurroundBlip
-        pv = pv.unsqueeze(1)  # shape (B,1,3,H,W)
         ids  = batch["input_ids"].to(device)
         mask = batch["attention_mask"].to(device)
 
