@@ -109,14 +109,13 @@ class QuIC360Dataset(Dataset):
             "answer": answer
         }
 
-    def crop_equirectangular_tensor(self, img_tensor: torch.Tensor,
-                                    fov: float = 90.0, overlap_ratio: float = 0.5):
+    def crop_equirectangular_tensor(self, img_tensor: torch.Tensor) -> torch.Tensor:
         B, C, H2, W4 = img_tensor.shape
         assert B == 1
         H, W = H2 // 2, W4 // 4
 
         # 1) stride 각도
-        step = fov * (1.0 - overlap_ratio)
+        step = self.fov * (1.0 - self.overlap_ratio)
 
         # 2) 필요한 패치 개수
         num_patches = int(np.ceil(360.0 / step))
@@ -134,7 +133,7 @@ class QuIC360Dataset(Dataset):
         for u_deg in yaw_centers:
             pers = e2p(
                 img_np,
-                fov_deg=fov,
+                fov_deg=self.fov,
                 u_deg=float(u_deg),
                 v_deg=0.0,
                 out_hw=(H, W),
