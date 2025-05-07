@@ -5,6 +5,7 @@ from torch.utils.data import DataLoader, Dataset
 from transformers.training_args import TrainingArguments
 from transformers import Blip2Processor, Blip2Config, Trainer
 from src.models.surroundblip import SurroundBlip
+from transformers import Blip2Processor, Blip2ForConditionalGeneration
 import pandas as pd
 from PIL import Image
 # 최대 픽셀 수 제한 해제 (None으로 설정)
@@ -37,7 +38,7 @@ def load_config(config_path):
 class QuIC360Dataset(Dataset):
     def __init__(self, 
                  csv_file: str,
-                 model_name: str = "Salesforce/blip2-opt-2.7b" ,
+                 processor: Blip2Processor,
                  image_size: list = [224,224],
                  max_length: Optional[int] = None,
                  split: str = "train",
@@ -48,7 +49,7 @@ class QuIC360Dataset(Dataset):
         super().__init__()
         
         self.df = pd.read_csv(csv_file)
-        self.processor = Blip2Processor.from_pretrained(model_name)
+        self.processor = processor
         
         self.max_length = max_length
         self.split = split
@@ -190,25 +191,24 @@ def main():
     wandb.init(project=config['wandb']['project'], name=config['wandb']['name'])
     
     # BLIP-2 모델 및 프로세서 로드
-    model_name = config['model']['name']
-    processor = Blip2Processor.from_pretrained(model_name)
-    # load Hugging Face BLIP-2 config and override Q-Former settings if provided
-    hf_config = Blip2Config.from_pretrained(config['model']['name'])
-    # override top-level num_query_tokens if present
-    if 'num_query_tokens' in config['model']:
-        hf_config.num_query_tokens = config['model']['num_query_tokens']
-    # override nested qformer_config fields if present
-    if 'qformer' in config['model']:
-        for key, value in config['model']['qformer'].items():
-            if hasattr(hf_config.qformer_config, key):
-                setattr(hf_config.qformer_config, key, value)
-    # instantiate SurroundBlip with modified config
-    model = SurroundBlip.from_pretrained(
-        config['model']['name'],
-        config=hf_config,
-        ignore_mismatched_sizes=True
-    )
-    
+    pretrain_name = config['model']['pretrain_name']
+    processor = Blip2Processor.from_pretrained(pretrain_name)
+    # Instantiate SurroundBlip when 'name' is 'surround', otherwise vanilla BLIP2
+    if config['model']['name'] == 'surround':
+        hf_config = Blip2Config.from_pretrained(pretrain_name)
+        if 'num_query_tokens' in config['model']:
+            hf_config.num_query_tokens = config['model']['num_query_tokens']
+        if 'qformer' in config['model']:
+            for key, value in config['model']['qformer'].items():
+                if hasattr(hf_config.qformer_config, key):
+                    setattr(hf_config.qformer_config, key, value)
+        model = SurroundBlip.from_pretrained(
+            pretrain_name,
+            config=hf_config,
+            ignore_mismatched_sizes=True
+        )
+    else:
+        model = Blip2ForConditionalGeneration.from_pretrained(pretrain_name)
     # Freeze vision encoder parameters
     # for param in model.vision_model.parameters():
     #     param.requires_grad = False
@@ -226,7 +226,7 @@ def main():
     data_dir = Path(config['data']['dir'])
     
     # 데이터셋 및 데이터로더 초기화
-    image_size = tuple(config['data']['image_size'])
+    
     print("train_file:", data_dir/config['data']['train_file'])
     print("valid_file:", data_dir/config['data']['valid_file'])
     train_dataset = QuIC360Dataset(
@@ -234,8 +234,9 @@ def main():
         processor, 
         max_length=config['data']['max_length'],
         split="train",
-        image_size=image_size,
+        image_size=list[config['data']['image_size']],
         do_crop=config['data']['do_crop'],
+        fov=config['data']['fov'],
         overlap_ratio=config['data']['overlap_ratio']
     )
     print(f"Dataset length: {len(train_dataset)}")
@@ -244,8 +245,9 @@ def main():
         processor, 
         max_length=config['data']['max_length'],
         split="valid",
-        image_size=image_size,
+        image_size=list[config['data']['image_size']],
         do_crop=config['data']['do_crop'],
+        fov=config['data']['fov'],
         overlap_ratio=config['data']['overlap_ratio']
     )
     print(f"Dataset length: {len(eval_dataset)}")

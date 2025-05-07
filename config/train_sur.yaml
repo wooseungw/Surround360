@@ -1,14 +1,17 @@
 # wandb 설정
 wandb:
     project: "Surround360"
-    name: "blip2_360_training"
+    name: "surround_360_training"
 
 # 모델 설정
 model:
-    name: "blip2"
+    name: "surround"
     pretrain_name: "Salesforce/blip2-flan-t5-xl" # HuggingFace 형식으로 저장된 경로
     save_dir: "saved_models/blip2_360"
-    max_new_tokens: 256 # 최대 생성 토큰 수
+    max_new_tokens: 50 # 최대 생성 토큰 수
+    num_query_tokens: 128 # Q-Former의 쿼리 토큰 수 original: 32
+    qformer:
+        hidden_size: 1024 # 원하는 Q-Former 레이어 수로 변경 original: 768
 
 # 데이터 설정
 data:
@@ -17,7 +20,8 @@ data:
     valid_file: "valid.csv"
     image_size: [ 224, 224 ]
     max_length: 256
-    do_crop: false
+    do_crop: true
+    fov: 90 # FOV 설정
     overlap_ratio: 0.5
 
 # deepspeed 설정
