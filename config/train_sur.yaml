@@ -6,8 +6,8 @@ wandb:
 # 모델 설정
 model:
     name: "surround"
-    pretrain_name: "Salesforce/blip2-flan-t5-xl" # HuggingFace 형식으로 저장된 경로
-    save_dir: "saved_models/blip2_360"
+    pretrain_name: "Salesforce/blip2-opt-2.7b" # HuggingFace 형식으로 저장된 경로
+    save_dir: "saved_models/surround_360"
     max_new_tokens: 50 # 최대 생성 토큰 수
     num_query_tokens: 128 # Q-Former의 쿼리 토큰 수 original: 32
     qformer:
@@ -31,14 +31,14 @@ deepspeed:
 
 # 학습 설정
 training:
-    output_dir: "outputs/blip2_360"
-    run_name: "blip2_360_baseline"
-    num_epochs: 5
+    output_dir: "outputs/surround_360"
+    run_name: "surround_360"
+    num_epochs: 50
     batch_size:
-        train: 4 # 12GB VRAM에 맞게 증가
-        eval: 4 # 평가 배치 크기도 증가
-    gradient_accumulation_steps: 4 # 효과적인 배치 크기 16
-    dataloader_num_workers: 0 # CPU 병렬 처리 추가
+        train: 64
+        eval: 256
+    gradient_accumulation_steps: 1 # 효과적인 배치 크기 16
+    dataloader_num_workers: 16 # CPU 병렬 처리 추가
     gradient_checkpointing: true # 메모리 최적화
 
     # 학습률 및 최적화
@@ -48,11 +48,11 @@ training:
 
     # 로깅 및 저장 설정
     logging_dir: "logs/blip2_360"
-    logging_steps: 50 # 더 자주 로깅
+    logging_steps: 4 # 더 자주 로깅
     eval_strategy: "steps" # step 기반으로 변경
-    eval_steps: 500 # 500 step마다 평가
+    eval_steps: 50 # 500 step마다 평가
     save_strategy: "steps" # step 기반 저장
-    save_steps: 500
+    save_steps: 50
     save_total_limit: 3 # 최대 3개 체크포인트 유지
     load_best_model_at_end: true
     metric_for_best_model: "eval_loss" # 최상의 모델 기준
