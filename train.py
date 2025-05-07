@@ -58,9 +58,12 @@ class QuIC360Dataset(Dataset):
             self.image_size = (int(image_size[0] * 2), int(image_size[1] * 4))
             self.fov = fov
             self.overlap_ratio = overlap_ratio
+            print(f"Do Crop, Image size: {self.image_size}")
         else:
             self.image_size = tuple(image_size)
+            print(f"Do not Crop, Image size: {self.image_size}")
         self.transform = transform
+        
         
     def __len__(self):
         return len(self.df)
@@ -237,7 +240,7 @@ def main():
         processor, 
         max_length=config['data']['max_length'],
         split="train",
-        image_size=list[config['data']['image_size']],
+        image_size=config['data']['image_size'],
         do_crop=config['data']['do_crop'],
         fov=config['data']['fov'],
         overlap_ratio=config['data']['overlap_ratio']
@@ -248,7 +251,7 @@ def main():
         processor, 
         max_length=config['data']['max_length'],
         split="valid",
-        image_size=list[config['data']['image_size']],
+        image_size=config['data']['image_size'],
         do_crop=config['data']['do_crop'],
         fov=config['data']['fov'],
         overlap_ratio=config['data']['overlap_ratio']
