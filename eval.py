@@ -8,7 +8,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from PIL import Image
 Image.MAX_IMAGE_PIXELS = None
-from transformers import Blip2Processor
+from transformers import Blip2Processor, Blip2ForConditionalGeneration, Blip2Config
 from src.models.surroundblip import SurroundBlip
 from pycocoevalcap.bleu.bleu import Bleu
 from pycocoevalcap.meteor.meteor import Meteor
@@ -89,8 +89,29 @@ def main():
 
     # Processor & Model 로드
     model_name = cfg["model"]["name_or_path"]
+    print("Model name:", name)
+    pretrain_name = cfg['model']['pretrain_name']
     processor  = Blip2Processor.from_pretrained(model_name)
-    model      = SurroundBlip.from_pretrained(model_name, ignore_mismatched_sizes=True)
+    if name == "surround":
+        print("Loading SurroundBlip model")
+        # load Hugging Face BLIP-2 config and override Q-Former settings if provided
+        hf_config = Blip2Config.from_pretrained(pretrain_name)
+        # override top-level num_query_tokens if present
+        if 'num_query_tokens' in cfg['model']:
+            hf_config.num_query_tokens = cfg['model']['num_query_tokens']
+        # override nested qformer_config fields if present
+        if 'qformer' in cfg['model']:
+            for key, value in cfg['model']['qformer'].items():
+                if hasattr(hf_config.qformer_config, key):
+                    setattr(hf_config.qformer_config, key, value)
+        model = SurroundBlip.from_pretrained(
+            pretrain_name,
+            config=hf_config,
+            ignore_mismatched_sizes=True
+        )
+    else:
+        print("Loading BLIP-2 model")
+        model = Blip2ForConditionalGeneration.from_pretrained(pretrain_name)
     model.to(device)
     model.eval()
 

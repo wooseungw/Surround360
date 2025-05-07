@@ -3,9 +3,8 @@ import os
 import torch
 from torch.utils.data import DataLoader, Dataset
 from transformers.training_args import TrainingArguments
-from transformers import Blip2Processor, Blip2Config, Trainer
 from src.models.surroundblip import SurroundBlip
-from transformers import Blip2Processor, Blip2ForConditionalGeneration
+from transformers import Blip2Processor, Blip2ForConditionalGeneration, Blip2Config, Trainer
 import pandas as pd
 from PIL import Image
 # 최대 픽셀 수 제한 해제 (None으로 설정)
@@ -194,10 +193,13 @@ def main():
     wandb.init(project=config['wandb']['project'], name=config['wandb']['name'])
     
     # BLIP-2 모델 및 프로세서 로드
+    name = config['model']['name']
+    print("Model name:", name)
     pretrain_name = config['model']['pretrain_name']
     processor = Blip2Processor.from_pretrained(pretrain_name, use_fast=False)
     # instantiate SurroundBlip with modified config
-    if getattr(pretrain_name, 'sur', None) is not None:
+    if name == "surround":
+        print("Loading SurroundBlip model")
         # load Hugging Face BLIP-2 config and override Q-Former settings if provided
         hf_config = Blip2Config.from_pretrained(pretrain_name)
         # override top-level num_query_tokens if present
@@ -213,7 +215,8 @@ def main():
             config=hf_config,
             ignore_mismatched_sizes=True
         )
-    elif getattr(pretrain_name, 'blip2', None) is None:
+    else:
+        print("Loading BLIP-2 model")
         model = Blip2ForConditionalGeneration.from_pretrained(pretrain_name)
     # Freeze vision encoder parameters
     # for param in model.vision_model.parameters():

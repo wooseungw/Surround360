@@ -2179,7 +2179,7 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         ```"""
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         # step 0: remove patch dimensions from pixel_values
-        print("pixel_values", pixel_values.shape)
+        # print("pixel_values", pixel_values.shape)
         B, P, C, H, W = pixel_values.shape
         pixel_values = pixel_values.view(B * P, C, H, W)
         
