@@ -191,12 +191,12 @@ def main():
     wandb.init(project=config['wandb']['project'], name=config['wandb']['name'])
     
     # BLIP-2 모델 및 프로세서 로드
-    model_name = config['model']['name']
-    processor = Blip2Processor.from_pretrained(model_name)
+    pretrain_name = config['model']['pretrain_name']
+    processor = Blip2Processor.from_pretrained(pretrain_name, use_fast=False)
     # instantiate SurroundBlip with modified config
-    if getattr(model_name, 'sur', None) is not None:
+    if getattr(pretrain_name, 'sur', None) is not None:
         # load Hugging Face BLIP-2 config and override Q-Former settings if provided
-        hf_config = Blip2Config.from_pretrained(config['model']['name'])
+        hf_config = Blip2Config.from_pretrained(pretrain_name)
         # override top-level num_query_tokens if present
         if 'num_query_tokens' in config['model']:
             hf_config.num_query_tokens = config['model']['num_query_tokens']
@@ -206,12 +206,12 @@ def main():
                 if hasattr(hf_config.qformer_config, key):
                     setattr(hf_config.qformer_config, key, value)
         model = SurroundBlip.from_pretrained(
-            config['model']['pretrain_name'],
+            pretrain_name,
             config=hf_config,
             ignore_mismatched_sizes=True
         )
-    elif getattr(model_name, 'blip2', None) is None:
-        model = Blip2ForConditionalGeneration.from_pretrained(config['model']['pretrain_name'])
+    elif getattr(pretrain_name, 'blip2', None) is None:
+        model = Blip2ForConditionalGeneration.from_pretrained(pretrain_name)
     # Freeze vision encoder parameters
     # for param in model.vision_model.parameters():
     #     param.requires_grad = False
