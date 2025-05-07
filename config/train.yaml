@@ -7,7 +7,10 @@ wandb:
 model:
     name: "Salesforce/blip2-flan-t5-xl"
     save_dir: "saved_models/blip2_360"
-    max_new_tokens: 256 # 최대 생성 토큰 수
+    max_new_tokens: 50 # 최대 생성 토큰 수
+    num_query_tokens: 128 # Q-Former의 쿼리 토큰 수 original: 32
+    qformer:
+        hidden_size: 1024 # 원하는 Q-Former 레이어 수로 변경 original: 768
 
 # 데이터 설정
 data:

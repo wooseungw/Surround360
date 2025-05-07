@@ -2038,6 +2038,7 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         self.vision_model = Blip2VisionModel(config.vision_config)
 
         self.query_tokens = nn.Parameter(torch.zeros(1, config.num_query_tokens, config.qformer_config.hidden_size))
+        print("init_ query_tokens", self.query_tokens.shape)
         self.qformer = Blip2QFormerModel(config.qformer_config)
 
         self.language_projection = nn.Linear(config.qformer_config.hidden_size, config.text_config.hidden_size)
@@ -2178,6 +2179,7 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         ```"""
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         # step 0: remove patch dimensions from pixel_values
+        print("pixel_values", pixel_values.shape)
         B, P, C, H, W = pixel_values.shape
         pixel_values = pixel_values.view(B * P, C, H, W)
         
@@ -2191,14 +2193,16 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
             interpolate_pos_encoding=interpolate_pos_encoding,
         )
         image_embeds = vision_outputs[0]
+        
         # (B*P, S, D) -> flatten P and S dims to (B, P*S, D)
-        B, P, C, H, W = pixel_values.shape  # ensure B and P are in scope
         S, D = image_embeds.shape[1], image_embeds.shape[2]
         image_embeds = image_embeds.view(B, P * S, D)
+        
         # attention mask for P*S tokens
         image_attention_mask = torch.ones((B, P * S), dtype=torch.long, device=image_embeds.device)
-
+        
         query_tokens = self.query_tokens.expand(image_embeds.shape[0], -1, -1)
+        # print("query_tokens", query_tokens.shape)
         query_outputs = self.qformer(
             query_embeds=query_tokens,
             encoder_hidden_states=image_embeds,
@@ -2208,7 +2212,7 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
             return_dict=return_dict,
         )
         query_output = query_outputs[0]
-
+        
         # Qformer is kept in fp32, we downcast the output back if needed
         if query_output.dtype != image_embeds.dtype:
             query_output = query_output.to(image_embeds.dtype)
@@ -2317,13 +2321,21 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
             # preprocess for `accelerate`
             self._preprocess_accelerate()
 
-        batch_size = pixel_values.shape[0]
-        image_embeds = self.vision_model(
+        # Flatten patch dimension like in forward
+        B, P, C, H, W = pixel_values.shape
+        pixel_values = pixel_values.view(B * P, C, H, W)
+
+        # After flattening, run vision encoder and reshape embeddings
+        batch_size = B
+        vision_outputs = self.vision_model(
             pixel_values,
             return_dict=True,
             interpolate_pos_encoding=interpolate_pos_encoding,
-        ).last_hidden_state
-        image_attention_mask = torch.ones(image_embeds.size()[:-1], dtype=torch.long, device=image_embeds.device)
+        )
+        image_embeds = vision_outputs.last_hidden_state  # (B*P, S, D)
+        S, D = image_embeds.shape[1], image_embeds.shape[2]
+        image_embeds = image_embeds.view(B, P * S, D)     # (B, P*S, D)
+        image_attention_mask = torch.ones((B, P * S), dtype=torch.long, device=image_embeds.device)
 
         query_tokens = self.query_tokens.expand(image_embeds.shape[0], -1, -1)
         query_outputs = self.qformer(

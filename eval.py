@@ -7,8 +7,9 @@ from tqdm import tqdm
 import torch
 from torch.utils.data import Dataset, DataLoader
 from PIL import Image
-
-from transformers import Blip2Processor, Blip2ForConditionalGeneration
+Image.MAX_IMAGE_PIXELS = None
+from transformers import Blip2Processor
+from src.models.surroundblip import SurroundBlip
 from pycocoevalcap.bleu.bleu import Bleu
 from pycocoevalcap.meteor.meteor import Meteor
 from pycocoevalcap.rouge.rouge import Rouge
@@ -19,11 +20,11 @@ import pandas as pd
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Evaluate BLIP-2 with YAML config"
+        description="Evaluate BLIP-2 모델을 YAML 설정으로 평가"
     )
     parser.add_argument(
         "--config", type=str, required=True,
-        help="Path to eval YAML file (e.g. config/eval.yaml)"
+        help="평가용 YAML 파일 경로 (예: config/eval.yaml)"
     )
     return parser.parse_args()
 
@@ -48,12 +49,12 @@ class EvalDataset(Dataset):
 
     def __getitem__(self, idx: int):
         row = self.df.iloc[idx]
-        img_path = row["url"]
-        query   = row["query"]
-        ann     = row["annotation"]
+        img_path = str(row["url"])
+        query    = str(row["query"])
+        ann      = str(row["annotation"])   # 반드시 문자열로 변환
 
         image = Image.open(img_path).convert("RGB")
-        # (필요 시 do_crop 로직 추가)
+        # 필요하다면 do_crop 로직을 여기에 추가
 
         inputs = self.processor(
             text=query,
@@ -63,12 +64,12 @@ class EvalDataset(Dataset):
             truncation=True,
             max_length=self.max_length
         )
-        pixel_values  = inputs.pixel_values.squeeze(0)   # [3, H, W]
-        input_ids      = inputs.input_ids.squeeze(0)     # [L]
-        attention_mask= inputs.attention_mask.squeeze(0) # [L]
+        pixel_values   = inputs.pixel_values.squeeze(0)    # [3, H, W]
+        input_ids       = inputs.input_ids.squeeze(0)      # [L]
+        attention_mask  = inputs.attention_mask.squeeze(0) # [L]
 
         return {
-            "pixel_values":  pixel_values,
+            "pixel_values":   pixel_values,
             "input_ids":      input_ids,
             "attention_mask": attention_mask,
             "url":            img_path,
@@ -78,23 +79,25 @@ class EvalDataset(Dataset):
 
 def main():
     args = parse_args()
-    with open(args.config, "r") as f:
+    with open(args.config, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
 
     # 디바이스 설정
-    device = torch.device(cfg.get("device", "cuda" if torch.cuda.is_available() else "cpu"))
+    device = torch.device(
+        cfg.get("device", "cuda" if torch.cuda.is_available() else "cpu")
+    )
 
-    # 프로세서 & 모델 로드
+    # Processor & Model 로드
     model_name = cfg["model"]["name_or_path"]
     processor  = Blip2Processor.from_pretrained(model_name)
-    model      = Blip2ForConditionalGeneration.from_pretrained(model_name)
+    model      = SurroundBlip.from_pretrained(model_name, ignore_mismatched_sizes=True)
     model.to(device)
     model.eval()
 
-    # 데이터셋 & 로더 설정
-    data_dir   = cfg["data"]["dir"]
-    csv_path   = os.path.join(data_dir, cfg["data"]["test_file"])
-    dataset    = EvalDataset(
+    # 데이터셋 & DataLoader 설정
+    data_dir = cfg["data"]["dir"]
+    csv_path = os.path.join(data_dir, cfg["data"]["test_file"])
+    dataset = EvalDataset(
         csv_path=csv_path,
         processor=processor,
         max_length=cfg["data"]["max_length"],
@@ -109,28 +112,30 @@ def main():
         shuffle=False
     )
 
-    # 생성 설정
+    # 생성 파라미터
     gen_args = {
-        "max_length": cfg["generate"]["max_length"],
+        "max_new_tokens": cfg["generate"]["max_length"],
         "num_beams":  cfg["generate"]["num_beams"],
     }
 
-    # 평가 지표 준비
+    # 평가 지표 초기화
     scorers = [
-        (Bleu(4),         ["Bleu_1","Bleu_2","Bleu_3","Bleu_4"]),
-        (Meteor(),        "METEOR"),
-        (Rouge(),         "ROUGE_L"),
-        (Cider(),         "CIDEr"),
-        (Spice(),         "SPICE")
+        (Bleu(4),          ["Bleu_1","Bleu_2","Bleu_3","Bleu_4"]),
+        (Meteor(),         "METEOR"),
+        (Rouge(),          "ROUGE_L"),
+        (Cider(),          "CIDEr"),
+        (Spice(),          "SPICE")
     ]
 
-    references = []
-    hypotheses = []
-    details    = []
+    references = []  # list of list of reference captions
+    hypotheses = []  # list of predicted captions
+    details    = []  # 샘플별 상세 정보
 
     # 평가 루프
     for batch in tqdm(dataloader, desc="Evaluating"):
         pv   = batch["pixel_values"].to(device)
+        # add patch dimension for SurroundBlip
+        pv = pv.unsqueeze(1)  # shape (B,1,3,H,W)
         ids  = batch["input_ids"].to(device)
         mask = batch["attention_mask"].to(device)
 
@@ -143,11 +148,12 @@ def main():
             )
         preds = processor.batch_decode(gen_ids, skip_special_tokens=True)
 
-        # 배치별 결과 축적
+        # 결과 축적
         for url, query, ref, pred in zip(
             batch["url"], batch["query"], batch["annotation"], preds
         ):
-            references.append([ref])     # scorer 에 맞춰 list of list
+            # ref는 이미 str() 처리되어 있으므로 안전하게 사용 가능
+            references.append([ref])
             hypotheses.append(pred.strip())
             details.append({
                 "url":        url,
@@ -156,27 +162,30 @@ def main():
                 "hypothesis": pred.strip()
             })
 
-    # 전체 스코어 계산
+    # --- dict 포맷으로 변환 후 스코어 계산 ---
+    gts = {i: references[i] for i in range(len(references))}
+    res = {i: [hypotheses[i]]    for i in range(len(hypotheses))}
+
     overall = {}
     for scorer, name in scorers:
-        score, _ = scorer.compute_score(references, hypotheses)
+        score, _ = scorer.compute_score(gts, res)
         if isinstance(name, list):
-            # BLEU_1~4
             for n, s in zip(name, score):
                 overall[n] = s
         else:
             overall[name] = score
 
-    # JSON 저장
+    # 결과 JSON으로 저장
     out = {
         "overall": overall,
         "details": details
     }
-    os.makedirs(os.path.dirname(cfg["output"]["result_file"]), exist_ok=True)
-    with open(cfg["output"]["result_file"], "w", encoding="utf-8") as f:
+    output_path = cfg["output"]["result_file"]
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False, indent=2)
 
-    print("▶ Evaluation finished. Results saved to", cfg["output"]["result_file"])
+    print(f"▶ 평가 완료. 결과가 저장되었습니다: {output_path}")
 
 if __name__ == "__main__":
     main()
