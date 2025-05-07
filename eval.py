@@ -138,10 +138,10 @@ def main():
     )
 
     # Processor & Model 로드
-    model_name = cfg["model"]["name_or_path"]
+    name = cfg["model"]["name"]
     print("Model name:", name)
-    pretrain_name = cfg['model']['pretrain_name']
-    processor  = Blip2Processor.from_pretrained(model_name)
+    pretrain_name = cfg['model']['pretrain_path']
+    processor  = Blip2Processor.from_pretrained(pretrain_name)
     if name == "surround":
         print("Loading SurroundBlip model")
         # load Hugging Face BLIP-2 config and override Q-Former settings if provided
