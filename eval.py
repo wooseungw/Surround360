@@ -17,6 +17,8 @@ from pycocoevalcap.cider.cider import Cider
 from pycocoevalcap.spice.spice import Spice
 from typing import Dict, List, Optional, Union, Any
 import pandas as pd
+from py360convert import e2p
+import numpy as np
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -169,7 +171,7 @@ def main():
     data_dir = cfg["data"]["dir"]
     csv_path = os.path.join(data_dir, cfg["data"]["test_file"])
     dataset = EvalDataset(
-        csv_path=csv_path,
+        csv_file=csv_path,
         processor=processor,
         max_length=cfg["data"]["max_length"],
         image_size=cfg["data"]["image_size"],
