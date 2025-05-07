@@ -82,7 +82,7 @@ class EvalDataset(Dataset):
         pixel_values   = inputs.pixel_values.squeeze(0)    # [3, H, W]
         input_ids       = inputs.input_ids.squeeze(0)      # [L]
         attention_mask  = inputs.attention_mask.squeeze(0) # [L]
-
+        print(f"pixel_values shape: {pixel_values.shape}")
         return {
             "pixel_values":   pixel_values,
             "input_ids":      input_ids,
