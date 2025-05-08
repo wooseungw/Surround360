@@ -31,7 +31,7 @@ pip install https://github.com/daswer123/deepspeed-windows/releases/download/13.
 ```
 pip install -r requirements.txt
 ```
-#### Install Surround360
+#### Install Surround360 (May not requirements work)
 ```
 pip install transformers==4.51.3
 pip install deepspeed
