@@ -281,12 +281,15 @@ def main():
         save_strategy=config['training']['save_strategy'],
         save_steps=config['training'].get('save_steps', 500),
         save_total_limit=config['training'].get('save_total_limit', 3),
+        save_optimizer=False,      # skip saving optimizer state to reduce checkpoint size
+        save_scheduler=False,      # skip saving scheduler state to reduce checkpoint size
         load_best_model_at_end=config['training']['load_best_model_at_end'],
         metric_for_best_model=config['training'].get('metric_for_best_model', 'eval_loss'),
         greater_is_better=config['training'].get('greater_is_better', False),
         fp16=True,  # DeepSpeed config에서 관리
         deepspeed=config['deepspeed']['config'] if config['deepspeed']['enabled'] else None,
         report_to=config['training']['report_to'],
+        save_only_model=True
     )
 
     # 트레이너 초기화
