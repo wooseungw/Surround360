@@ -287,8 +287,6 @@ def main():
         fp16=True,  # DeepSpeed config에서 관리
         deepspeed=config['deepspeed']['config'] if config['deepspeed']['enabled'] else None,
         report_to=config['training']['report_to'],
-        save_optimizer=False,        # optimizer state 저장하지 않음
-        save_scheduler=False,       # scheduler state도 저장하지 않으려면   
     )
 
     # 트레이너 초기화
