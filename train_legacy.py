@@ -4,6 +4,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 from transformers.training_args import TrainingArguments
 from src.models.surroundblip import SurroundBlip
+from src.trainer.trainer import ContrastiveMatchingTrainer
 from transformers import Blip2Processor, Blip2ForConditionalGeneration, Blip2Config, Trainer
 import pandas as pd
 from PIL import Image
@@ -22,6 +23,7 @@ import numpy as np
 import torch.nn.functional as F
 
 PAD_TOKEN_ID = 1
+IGNORE_INDEX = -100
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train BLIP-2 model with parameters from a YAML file")
@@ -73,10 +75,12 @@ class QuIC360Dataset(Dataset):
         question = str(self.df.iloc[idx]["query"])
         answer = str(self.df.iloc[idx]["annotation"])
         
+        prompt = f"Query: {question}"
+        full_text = prompt + " " + "Answer: " + answer
         # 이미지를 로드합니다.
         image = Image.open(image_path).convert("RGB")
         inputs = self.processor(
-                text=question,
+                text=full_text,
                 images=image,
                 size=self.image_size,
                 return_tensors="pt",
@@ -90,20 +94,17 @@ class QuIC360Dataset(Dataset):
             inputs["pixel_values"] = self.crop_equirectangular_tensor(inputs["pixel_values"])
         
         # 정답을 전처리합니다.
-        answers = self.processor(
-            text=answer,
-            return_tensors="pt",
-            max_length=self.max_length,
-            padding="max_length",
-            truncation=True,
-        )
+        labels = inputs.input_ids.clone()
+        q_len = len(self.processor(prompt).input_ids)  # 질문+<image> token 개수
+        labels[:, :q_len] = IGNORE_INDEX
+        labels[labels == self.processor.pad_token_id] = IGNORE_INDEX
         
         # Hugging Face Trainer가 기대하는 평평한 구조로 반환
         return {
             "pixel_values": inputs["pixel_values"].squeeze(0),  # (Num Crops ,C, H, W)
             "input_ids": inputs["input_ids"].squeeze(0),        # (L1)
             "attention_mask": inputs["attention_mask"].squeeze(0),  # (L1)
-            "labels": answers["input_ids"].squeeze(0),          # (L2)
+            "labels": labels.squeeze(0),          # (L2)
             "image_path": image_path,
             "question": question,
             "answer": answer
@@ -226,6 +227,15 @@ def main():
         param.requires_grad = False
     print("Language model parameters have been frozen.")
     
+    if config['training']['train_itm']:
+        from torch import nn
+        model.tau       = nn.Parameter(torch.tensor(1.0))                           # 대조 온도
+        hidden_size    = model.qformer.config.hidden_size
+        model.itm_head = nn.Linear(hidden_size, 2)                                 # 이미지-텍스트 매칭 헤드
+        # 3) 언어모델 파라미터는 동결 (ITC/ITM 단계에서는 generator는 건드리지 않음)
+        for p in model.language_model.parameters():
+            p.requires_grad = False
+
     # 장치 설정
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
@@ -281,8 +291,6 @@ def main():
         save_strategy=config['training']['save_strategy'],
         save_steps=config['training'].get('save_steps', 500),
         save_total_limit=config['training'].get('save_total_limit', 3),
-        save_optimizer=False,      # skip saving optimizer state to reduce checkpoint size
-        save_scheduler=False,      # skip saving scheduler state to reduce checkpoint size
         load_best_model_at_end=config['training']['load_best_model_at_end'],
         metric_for_best_model=config['training'].get('metric_for_best_model', 'eval_loss'),
         greater_is_better=config['training'].get('greater_is_better', False),
@@ -293,7 +301,7 @@ def main():
     )
 
     # 트레이너 초기화
-    trainer = Trainer(
+    trainer = ContrastiveMatchingTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
