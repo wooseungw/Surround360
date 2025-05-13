@@ -2077,8 +2077,27 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
     def get_image_features(self):
         return self.vision_model.get_image_features()
     
-    def get_text_features(self):
-        return self.language_model.get_text_features()
+    def get_text_features(self , input_ids: Optional[torch.Tensor] = None, attention_mask: Optional[torch.Tensor] = None, return_dict: Optional[bool] = None):
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        if self.config.use_decoder_only_language_model:
+            text_outputs = self.language_model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                output_attentions=True,
+                output_hidden_states=True,
+                return_dict=return_dict,
+            )
+        else:
+            inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
+
+            text_outputs = self.language_model(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                output_attentions=True,
+                output_hidden_states=True,
+                return_dict=return_dict,
+            )
+        return text_outputs
         
 
     def _tie_weights(self):
