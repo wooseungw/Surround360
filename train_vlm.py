@@ -87,41 +87,106 @@ class QuIC360Dataset(Dataset):
             return_tensors="pt",
             do_center_crop=False        # crop_size 무시
         )
-        # print("pixel_dict:", pixel_dict.keys())
-        # print(pixel_dict["pixel_values"].shape)  # (1, C, H, W)
-
-        # (선택) equirectangular crop
         if self.do_crop:
             pixel_dict["pixel_values"] = self.crop_equirectangular_tensor(
                 pixel_dict["pixel_values"]
             )  # (B, C, H, W) or (B, T, C, H, W)
 
-        # 2) 텍스트 시퀀스 구성:  [question] <image>  [answer]  <eos>
-        prompt = f"{question} {IMAGE_TOKEN}"
-        full_text = prompt + " " + answer
-
-        tok = self.tokenizer(
-            full_text,
-            max_length=self.max_length,
-            padding="max_length",
-            truncation=True,
-            return_tensors="pt",
+        # 2) 채팅 템플릿 적용 방식으로 텍스트 시퀀스 구성
+        # 시스템 메시지 및 대화 구성
+        system_instruction = "You are a helpful assistant. Describe this image."
+        messages = [{"role": "system", "content": system_instruction}]
+        
+        # 질문 (이미지 토큰 포함)
+        user_content = f"{question} {IMAGE_TOKEN}<image>"
+        messages.append({"role": "user", "content": user_content})
+        
+        # 정답
+        messages.append({"role": "assistant", "content": answer})
+        
+        # 1. 먼저 텍스트 형태의 템플릿 생성
+        chat_text = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            return_tensors=None,
+            enable_thinking=False,
         )
-
-        # 라벨: question+<image> 영역 마스킹
-        labels = tok.input_ids.clone()
-        q_len = len(self.tokenizer(prompt).input_ids)  # 질문+<image> token 개수
-        labels[:, :q_len] = IGNORE_INDEX
+        
+        # 2. 어시스턴트 응답 시작 위치 찾기
+        assistant_token = "<|im_start|>assistant"
+        assistant_pos = chat_text.rfind(assistant_token)
+        
+        if assistant_pos == -1:
+            # 어시스턴트 토큰을 찾을 수 없는 경우 (매우 드문 경우)
+            print(f"Warning: assistant token not found in sample {idx}")
+            # 전체 시퀀스에 대해 토큰화 수행
+            tokenized = self.tokenizer(
+                chat_text, 
+                max_length=self.max_length,
+                padding="max_length",
+                truncation=True,
+                return_tensors="pt"
+            )
+            input_ids = tokenized["input_ids"].squeeze(0)
+            attention_mask = tokenized["attention_mask"].squeeze(0)
+            # 이 경우 라벨은 모두 -100으로 설정
+            labels = torch.full_like(input_ids, IGNORE_INDEX)
+        else:
+            # 전체 시퀀스 토큰화
+            tokenized = self.tokenizer(
+                chat_text,
+                max_length=self.max_length,
+                padding="max_length",
+                truncation=True,
+                return_tensors="pt"
+            )
+            input_ids = tokenized["input_ids"].squeeze(0)
+            attention_mask = tokenized["attention_mask"].squeeze(0)
+            
+            # 어시스턴트 응답 부분만 토큰화
+            assistant_text = chat_text[assistant_pos:]
+            assistant_tokenized = self.tokenizer(assistant_text, return_tensors="pt")
+            assistant_ids = assistant_tokenized["input_ids"].squeeze(0)
+            
+            # 어시스턴트 응답 시작 위치 찾기 (토큰 ID 기준)
+            # 첫 몇 개 토큰을 확인하여 매칭
+            pattern_length = min(5, len(assistant_ids))  # 첫 5개 토큰 또는 더 적은 수
+            pattern = assistant_ids[:pattern_length]
+            
+            # 패턴 매칭으로 시작 위치 찾기
+            start_idx = -1
+            for i in range(len(input_ids) - pattern_length + 1):
+                if torch.all(input_ids[i:i+pattern_length] == pattern):
+                    start_idx = i
+                    break
+            
+            if start_idx == -1:
+                print(f"Warning: Could not find assistant response in sample {idx}")
+                labels = torch.full_like(input_ids, IGNORE_INDEX)
+            else:
+                # 라벨 생성: 어시스턴트 응답 시작 위치부터 실제 토큰 ID, 나머지는 IGNORE_INDEX
+                labels = torch.full_like(input_ids, IGNORE_INDEX)
+                labels[start_idx:] = input_ids[start_idx:]
+        
+        # 패딩 토큰 위치도 IGNORE_INDEX로 마스킹
         labels[labels == self.tokenizer.pad_token_id] = IGNORE_INDEX
-
-        print("pixel_values:", pixel_dict["pixel_values"].shape)
+        
+        # 디버깅 (첫 번째 샘플에 대해서만)
+        if idx == 0:
+            print("Input sequence:")
+            print(self.tokenizer.decode(input_ids))
+            print("\nLabels (non-masked parts only):")
+            non_masked = labels[labels != IGNORE_INDEX]
+            print(self.tokenizer.decode(non_masked))
+            print(f"\nLabels shape: {labels.shape}, Non-masked count: {(labels != IGNORE_INDEX).sum().item()}")
+        
         return {
             # vision
             "pixel_values": pixel_dict["pixel_values"],  # (C, H, W)
             # text
-            "input_ids": tok.input_ids.squeeze(0),
-            "attention_mask": tok.attention_mask.squeeze(0),
-            "labels": labels.squeeze(0),
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "labels": labels,
             # 로그/디버깅용 부가 정보
             "image_path": img_path,
             "question": question,
