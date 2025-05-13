@@ -34,6 +34,7 @@ class QuIC360Dataset(Dataset):
     def __init__(self, 
                  csv_file: str,
                  img_processor: AutoProcessor,
+                 tokenzier: AutoTokenizer,
                  image_size: list = [224,224],
                  max_length: Optional[int] = None,
                  split: str = "train",
@@ -45,6 +46,7 @@ class QuIC360Dataset(Dataset):
         
         self.df = pd.read_csv(csv_file)
         self.processor = img_processor
+        self.tokenizer = tokenzier
         
         self.max_length = max_length
         self.split = split

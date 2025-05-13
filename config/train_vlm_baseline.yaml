@@ -1,56 +1,51 @@
-# 모델 설정
+# config/train.yaml
 wandb:
     project: "Surround360"
-    name: "blip2_360_training"
+    name: "{model_name}"
 
 model:
-    name: "test"
-    vision_model_name: "facebook/dinov2-small"
-    llm_model_name: "Qwen/Qwen3-0.6B"
-    projector_type: "mlp2x_gelu"
-    use_resampler: true
-    mm_spatial_pool_mode: "average"
-    mm_newline_position: "grid"
-    freeze_vision: true
-    freeze_llm: true
+    name: "quic360-vlm" # 모델 이름 (경로 형식에 사용됨)
+    vision_model_name: "facebook/dinov2-small" # 비전 모델
+    llm_model_name: "Qwen/Qwen3-0.6B" # 언어 모델
+    projector_type: "mlp" # 프로젝터 유형 (mlp, linear)
+    use_resampler: true # 리샘플러 사용 여부
+    mm_spatial_pool_mode: "attn_mean" # 공간 풀링 모드
+    mm_newline_position: "grid" # 뉴라인 위치
+    freeze_vision: false # 비전 모델 고정 여부
+    freeze_llm: true # 언어 모델 고정 여부
 
-data:
-    csv_file: "data/quic360/train.csv"
-    do_crop: true
-    crop_size: [ 224, 224 ]
-    fov: 90
-    overlap_ratio: 0.5
+dataset:
+    train_csv: "data/train.csv" # 훈련 데이터 CSV 경로
+    valid_csv: "data/valid.csv" # 검증 데이터 CSV 경로
+    image_size: [ 224, 224 ] # 기본 이미지 크기
+    max_length: 128 # 최대 토큰 길이
+    do_crop: true # 360도 이미지 크롭 여부
+    fov: 90.0 # 시야각 (Field of View), do_crop이 true일 때 사용
+    overlap_ratio: 0.5 # 크롭 간 중첩 비율, do_crop이 true일 때 사용
 
-# 학습 설정
 training:
-    output_dir: "outputs/{model_name}"
-    run_name: "{model_name}_baseline"
-    num_train_epochs: 10
+    output_dir: "outputs/{model_name}" # 출력 디렉토리
+    run_name: "{model_name}-training" # 실행 이름
+    logging_dir: "logs/{model_name}" # 로깅 디렉토리
+    num_train_epochs: 3 # 훈련 에포크 수
     batch_size:
-        train: 16
-        eval: 16
-    gradient_accumulation_steps: 1 # 효과적인 배치 크기 16
-    dataloader_num_workers: 16 # CPU 병렬 처리 추가
-    gradient_checkpointing: true # 메모리 최적화
-    # 학습률 및 최적화
-    learning_rate: 2e-5
-    warmup_ratio: 0.1 # warmup 단계 추가
-    weight_decay: 0.01
+        train: 4 # 디바이스당 훈련 배치 크기
+        eval: 8 # 디바이스당 평가 배치 크기
+    gradient_accumulation_steps: 4 # 그래디언트 누적 단계
+    learning_rate: 5e-5 # 학습률
+    weight_decay: 0.01 # 가중치 감쇠
+    warmup_ratio: 0.03 # 웜업 비율
+    dataloader_num_workers: 4 # 데이터 로더 워커 수
+    eval_strategy: "steps" # 평가 전략 (no, steps, epoch)
+    eval_steps: 500 # 평가 단계 (eval_strategy가 steps일 때)
+    save_strategy: "steps" # 저장 전략 (no, steps, epoch)
+    save_steps: 500 # 저장 단계 (save_strategy가 steps일 때)
+    save_total_limit: 3 # 저장할 총 체크포인트 수
+    report_to: "tensorboard" # 보고 대상 (tensorboard, wandb 등)
+    logging_steps: 100 # 로깅 단계
+    max_grad_norm: 1.0 # 최대 그래디언트 노름
 
-    # 로깅 및 저장 설정
-    logging_dir: "logs/{model_name}"
-    logging_steps: 4 # 더 자주 로깅
-    eval_strategy: "steps" # step 기반으로 변경
-    eval_steps: 50 # 500 step마다 평가
-    save_strategy: "steps" # step 기반 저장
-    save_steps: 50
-    save_total_limit: 3 # 최대 3개 체크포인트 유지
-    load_best_model_at_end: true
-    metric_for_best_model: "eval_loss" # 최상의 모델 기준
-    greater_is_better: false
-
-    # 보고 설정
-    report_to: "wandb"
-
-    # 추가 최적화
-    max_grad_norm: 1.0 # gradient clipping
+# DeepSpeed 설정 (선택 사항)
+deepspeed:
+    enabled: false # DeepSpeed 사용 여부
+    config: "config/deepspeed_config.json" # DeepSpeed 설정 파일 경로
