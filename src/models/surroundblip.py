@@ -2076,6 +2076,9 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
 
     def get_image_features(self):
         return self.vision_model.get_image_features()
+    
+    def get_text_features(self):
+        return self.language_model.get_text_features()
         
 
     def _tie_weights(self):
