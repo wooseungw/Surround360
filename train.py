@@ -80,8 +80,8 @@ class QuIC360Dataset(Dataset):
         # 이미지를 로드합니다.
         image = Image.open(image_path).convert("RGB")
         inputs = self.processor(
-                text=full_text,
                 images=image,
+                text=full_text,
                 size=self.image_size,
                 return_tensors="pt",
                 max_length=self.max_length,
