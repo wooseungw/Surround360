@@ -19,92 +19,113 @@ from typing import Dict, Union, Optional
 import numpy as np
 import pandas as pd
 from PIL import Image
+Image.MAX_IMAGE_PIXELS = None
 from py360convert import e2p
 
 from src.models.config import VisionLanguageConfig
 from src.models.build import CustomVLMModel
 PAD_TOKEN_ID = 1
 
-
+IMAGE_TOKEN = "<image>"
+IGNORE_INDEX = -100
 # ---------------------------------------------------------------------------- #
 # 1. Dataset for Images & Video Frames
 # ---------------------------------------------------------------------------- #
 
 class QuIC360Dataset(Dataset):
-    def __init__(self, 
-                 csv_file: str,
-                 img_processor: AutoProcessor,
-                 tokenzier: AutoTokenizer,
-                 image_size: list = [224,224],
-                 max_length: Optional[int] = None,
-                 split: str = "train",
-                 do_crop: bool = False,
-                 fov: Optional[float] = None,
-                 overlap_ratio: Optional[float] = None,
-                 transform: bool = False):
+    def __init__(
+        self,
+        csv_file: str,
+        image_processor: AutoProcessor,
+        tokenizer: AutoTokenizer,
+        image_size: tuple[int, int] = (224, 224),
+        max_length: int = 256,
+        split: str = "train",
+        do_crop: bool = False,
+        fov: float | None = None,
+        overlap_ratio: float | None = None,
+        transform: bool = False,
+    ):
         super().__init__()
-        
         self.df = pd.read_csv(csv_file)
-        self.processor = img_processor
-        self.tokenizer = tokenzier
-        
+        self.image_processor = image_processor
+        self.tokenizer = tokenizer
         self.max_length = max_length
         self.split = split
+
         self.do_crop = do_crop
-        if self.do_crop:
-            self.image_size = (int(image_size[0] * 2), int(image_size[1] * 4))
-            self.fov = fov
-            self.overlap_ratio = overlap_ratio
-            print(f"Do Crop, Image size: {self.image_size}")
-        else:
-            self.image_size = tuple(image_size)
-            print(f"Do not Crop, Image size: {self.image_size}")
+        self.image_size = (
+            (int(image_size[0] * 2), int(image_size[1] * 4)) if do_crop else image_size
+        )
+        print(f"image_size: {self.image_size}")
+        self.fov, self.overlap_ratio = fov, overlap_ratio
         self.transform = transform
-        
-        
+
+        # pad_token 미정의 LLM 대비용
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
+        print(f"[{split}] img_size={self.image_size}  do_crop={self.do_crop}")
+
+    # ──────────────────────────────────────
     def __len__(self):
         return len(self.df)
-    
-    def __getitem__(self, idx: int) -> Dict[str, Union[torch.Tensor, str]]:
-        # 이미지 경로와 질문, 정답을 가져옵니다.
-        image_path = self.df.iloc[idx]["url"]
-        question = str(self.df.iloc[idx]["query"])
-        answer = str(self.df.iloc[idx]["annotation"])
-        
-        # 이미지를 로드합니다.
-        image = Image.open(image_path).convert("RGB")
-        inputs = self.processor(
-                text=question,
-                images=image,
-                size=self.image_size,
-                return_tensors="pt",
-                max_length=self.max_length,
-                padding="max_length",
-                truncation=True,
-            )
-        # qtext = f"Question: {question} Answer:"
-        # 질문과 정답을 전처리합니다.
-        if self.do_crop:
-            inputs["pixel_values"] = self.crop_equirectangular_tensor(inputs["pixel_values"])
-        
-        # 정답을 전처리합니다.
-        answers = self.processor(
-            text=answer,
+
+    # ──────────────────────────────────────
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor | str]:
+        rec = self.df.iloc[idx]
+        img_path: str = rec["url"]
+        question: str = str(rec["query"])
+        answer: str = str(rec["annotation"])
+
+        # 1) 이미지 전처리 → pixel_values: (1, C, H, W)
+        image = Image.open(img_path).convert("RGB")
+        pixel_dict = self.image_processor(
+            images=image, 
+            do_resize=True, 
+            size={"height": self.image_size[0], "width": self.image_size[1]},
             return_tensors="pt",
+            do_center_crop=False        # crop_size 무시
+        )
+        # print("pixel_dict:", pixel_dict.keys())
+        # print(pixel_dict["pixel_values"].shape)  # (1, C, H, W)
+
+        # (선택) equirectangular crop
+        if self.do_crop:
+            pixel_dict["pixel_values"] = self.crop_equirectangular_tensor(
+                pixel_dict["pixel_values"]
+            )  # (B, C, H, W) or (B, T, C, H, W)
+
+        # 2) 텍스트 시퀀스 구성:  [question] <image>  [answer]  <eos>
+        prompt = f"{question} {IMAGE_TOKEN}"
+        full_text = prompt + " " + answer
+
+        tok = self.tokenizer(
+            full_text,
             max_length=self.max_length,
             padding="max_length",
             truncation=True,
+            return_tensors="pt",
         )
-        
-        # Hugging Face Trainer가 기대하는 평평한 구조로 반환
+
+        # 라벨: question+<image> 영역 마스킹
+        labels = tok.input_ids.clone()
+        q_len = len(self.tokenizer(prompt).input_ids)  # 질문+<image> token 개수
+        labels[:, :q_len] = IGNORE_INDEX
+        labels[labels == self.tokenizer.pad_token_id] = IGNORE_INDEX
+
+        print("pixel_values:", pixel_dict["pixel_values"].shape)
         return {
-            "pixel_values": inputs["pixel_values"].squeeze(0),  # (Num Crops ,C, H, W)
-            "input_ids": inputs["input_ids"].squeeze(0),        # (L1)
-            "attention_mask": inputs["attention_mask"].squeeze(0),  # (L1)
-            "labels": answers["input_ids"].squeeze(0),          # (L2)
-            "image_path": image_path,
+            # vision
+            "pixel_values": pixel_dict["pixel_values"],  # (C, H, W)
+            # text
+            "input_ids": tok.input_ids.squeeze(0),
+            "attention_mask": tok.attention_mask.squeeze(0),
+            "labels": labels.squeeze(0),
+            # 로그/디버깅용 부가 정보
+            "image_path": img_path,
             "question": question,
-            "answer": answer
+            "answer": answer,
         }
 
     def crop_equirectangular_tensor(self, img_tensor: torch.Tensor) -> torch.Tensor:
@@ -142,7 +163,7 @@ class QuIC360Dataset(Dataset):
             patches.append(t)
 
         # (N, C, H, W) → (1, N, C, H, W)
-        return torch.stack(patches, dim=0).unsqueeze(0)
+        return torch.stack(patches, dim=0)
 
 def data_collator(features):
     """Simple data collator for BLIP2"""
@@ -188,7 +209,7 @@ def data_collator(features):
 # ---------------------------------------------------------------------------- #
 def parse_args():
     parser = argparse.ArgumentParser(description="Train VLM with parameters from YAML")
-    parser.add_argument("--config", type=str, default="config/train.yaml", help="Path to the YAML config")
+    parser.add_argument("--config", type=str, default="config/train_vlm_baseline.yaml", help="Path to the YAML config")
     return parser.parse_args()
 
 def load_config(config_path: str):
@@ -234,8 +255,8 @@ def main():
     ds_cfg = cfg.dataset
     train_ds = QuIC360Dataset(
         csv_file=ds_cfg.train_csv,
-        img_processor=vision_processor,
-        tokenzier = language_processor,
+        image_processor=vision_processor,
+        tokenizer = language_processor,
         image_size=ds_cfg.image_size,
         max_length=ds_cfg.max_length,
         split="train",
@@ -245,8 +266,8 @@ def main():
     )
     valid_ds = QuIC360Dataset(
         csv_file=ds_cfg.valid_csv,
-        img_processor=vision_processor,
-        tokenzier = language_processor,
+        image_processor=vision_processor,
+        tokenizer = language_processor,
         image_size=ds_cfg.image_size,
         max_length=ds_cfg.max_length,
         split="valid",

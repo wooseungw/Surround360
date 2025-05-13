@@ -30,8 +30,8 @@ training:
     logging_dir: "logs/{model_name}" # 로깅 디렉토리
     num_train_epochs: 3 # 훈련 에포크 수
     batch_size:
-        train: 1 # 디바이스당 훈련 배치 크기
-        eval: 1 # 디바이스당 평가 배치 크기
+        train: 8 # 디바이스당 훈련 배치 크기
+        eval: 8 # 디바이스당 평가 배치 크기
     gradient_accumulation_steps: 4 # 그래디언트 누적 단계
     learning_rate: 5e-5 # 학습률
     weight_decay: 0.01 # 가중치 감쇠

@@ -1,108 +1,84 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-
-# This source code is licensed under the license found in the
-# LICENSE file in the root directory of this source tree.
-
-from pathlib import Path
-import argparse
-import json
-import math
-import os
-import sys
-import time
-
-import torch
 import torch.nn.functional as F
-from torch import nn, optim
-import torch.distributed as dist
-import torchvision.datasets as datasets
-
-import augmentations as aug
-from distributed import init_distributed_mode
-
-# import resnet
-
-# @inproceedings{bardes2022vicreg,
-#   author  = {Adrien Bardes and Jean Ponce and Yann LeCun},
-#   title   = {VICReg: Variance-Invariance-Covariance Regularization For Self-Supervised Learning},
-#   booktitle = {ICLR},
-#   year    = {2022},
-# }
-
-def Projector(args, embedding):
-    mlp_spec = f"{embedding}-{args.mlp}"
-    layers = []
-    f = list(map(int, mlp_spec.split("-")))
-    for i in range(len(f) - 2):
-        layers.append(nn.Linear(f[i], f[i + 1]))
-        layers.append(nn.BatchNorm1d(f[i + 1]))
-        layers.append(nn.ReLU(True))
-    layers.append(nn.Linear(f[-2], f[-1], bias=False))
-    return nn.Sequential(*layers)
+from torch import nn
 
 
-def exclude_bias_and_norm(p):
-    return p.ndim == 1
 
-
-def off_diagonal(x):
-    n, m = x.shape
-    assert n == m
-    return x.flatten()[:-1].view(n - 1, n + 1)[:, 1:].flatten()
-
-class FullGatherLayer(torch.autograd.Function):
+class VICRegLoss(nn.Module):
+    """VICReg (Variance-Invariance-Covariance Regularization) 변형 손실 함수.
+    
+    50% 겹치는 이미지 영역(좌-우측 절반, 우-좌측 절반)의 특징 일관성을 
+    강화하기 위한 손실 함수입니다.
     """
-    Gather tensors from all process and support backward propagation
-    for the gradients across processes.
-    """
-
-    @staticmethod
-    def forward(ctx, x):
-        output = [torch.zeros_like(x) for _ in range(dist.get_world_size())]
-        dist.all_gather(output, x)
-        return tuple(output)
-
-    @staticmethod
-    def backward(ctx, *grads):
-        all_gradients = torch.stack(grads)
-        dist.all_reduce(all_gradients)
-        return all_gradients[dist.get_rank()]
-
-class VICReg(nn.Module):
-    def __init__(self, args):
+    
+    def __init__(self, 
+                 sim_coef=25.0, 
+                 var_coef=25.0, 
+                 cov_coef=1.0, 
+                 eps=1e-4):
+        """
+        Args:
+            sim_coef: 유사성(invariance) 손실 계수
+            var_coef: 분산(variance) 손실 계수
+            cov_coef: 공분산(covariance) 손실 계수
+            eps: 수치 안정성을 위한 작은 상수
+        """
         super().__init__()
-        self.args = args
-        self.num_features = int(args.mlp.split("-")[-1])
-        self.backbone, self.embedding = resnet.__dict__[args.arch](
-            zero_init_residual=True
-        )
-        self.projector = Projector(args, self.embedding)
-
-    def forward(self, x, y):
-        x = self.projector(self.backbone(x))
-        y = self.projector(self.backbone(y))
-
-        repr_loss = F.mse_loss(x, y)
-
-        x = torch.cat(FullGatherLayer.apply(x), dim=0)
-        y = torch.cat(FullGatherLayer.apply(y), dim=0)
-        x = x - x.mean(dim=0)
-        y = y - y.mean(dim=0)
-
-        std_x = torch.sqrt(x.var(dim=0) + 0.0001)
-        std_y = torch.sqrt(y.var(dim=0) + 0.0001)
-        std_loss = torch.mean(F.relu(1 - std_x)) / 2 + torch.mean(F.relu(1 - std_y)) / 2
-
-        cov_x = (x.T @ x) / (self.args.batch_size - 1)
-        cov_y = (y.T @ y) / (self.args.batch_size - 1)
-        cov_loss = off_diagonal(cov_x).pow_(2).sum().div(
-            self.num_features
-        ) + off_diagonal(cov_y).pow_(2).sum().div(self.num_features)
-
-        loss = (
-            self.args.sim_coeff * repr_loss
-            + self.args.std_coeff * std_loss
-            + self.args.cov_coeff * cov_loss
-        )
-        return loss
+        self.sim_coef = sim_coef
+        self.var_coef = var_coef
+        self.cov_coef = cov_coef
+        self.eps = eps
+    
+    def forward(self, left_embeds, right_embeds):
+        """
+        겹치는 영역의 특징 간 VICReg 손실을 계산합니다.
+        
+        Args:
+            left_embeds: 좌측 이미지 특징 (B, N, D)
+            right_embeds: 우측 이미지 특징 (B, N, D)
+            
+        Returns:
+            total_loss: 전체 손실
+            losses: 개별 손실 컴포넌트 (dictionary)
+        """
+        # 패치 수 파악 및 겹치는 영역 추출
+        B, N, D = left_embeds.shape
+        n_half = N // 2
+        
+        # 좌측 이미지의 우측 절반과 우측 이미지의 좌측 절반 추출
+        left_right_half = left_embeds[:, n_half:, :]   # 좌측 이미지 우측 절반
+        right_left_half = right_embeds[:, :n_half, :]  # 우측 이미지 좌측 절반
+        
+        # 1. 유사성(invariance) 손실 - 겹치는 영역이 유사해야 함
+        # 배치 내 각 쌍에 대해 MSE 손실 계산
+        sim_loss = F.mse_loss(left_right_half, right_left_half)
+        
+        # 2. 분산(variance) 손실 - 각 차원이 충분한 분산을 가져야 함
+        # 평균 제거
+        left_centered = left_right_half - left_right_half.mean(dim=0, keepdim=True)
+        right_centered = right_left_half - right_left_half.mean(dim=0, keepdim=True)
+        
+        # 표준 편차 계산
+        std_left = torch.sqrt(left_centered.var(dim=0) + self.eps)
+        std_right = torch.sqrt(right_centered.var(dim=0) + self.eps)
+        
+        # 분산 손실: 각 차원의 표준 편차가 1보다 작으면 페널티
+        var_loss = torch.mean(F.relu(1 - std_left)) + torch.mean(F.relu(1 - std_right))
+        
+        # 3. 공분산(covariance) 손실 - 특징 간 상관관계 최소화
+        cov_left = (left_centered.T @ left_centered) / (B - 1)
+        cov_right = (right_centered.T @ right_centered) / (B - 1)
+        
+        # 대각선 마스크 (대각 요소 제외)
+        mask = ~torch.eye(D, device=left_embeds.device, dtype=torch.bool)
+        
+        # 비대각 요소의 제곱합
+        cov_loss = (cov_left[mask]**2).mean() + (cov_right[mask]**2).mean()
+        
+        # 전체 손실 계산
+        total_loss = self.sim_coef * sim_loss + self.var_coef * var_loss + self.cov_coef * cov_loss
+        
+        return total_loss, {
+            "sim_loss": sim_loss.detach(), 
+            "var_loss": var_loss.detach(), 
+            "cov_loss": cov_loss.detach()
+        }

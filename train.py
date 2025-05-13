@@ -301,7 +301,7 @@ def main():
     )
 
     # 트레이너 초기화
-    trainer = ContrastiveMatchingTrainer(
+    trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,

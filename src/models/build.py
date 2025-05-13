@@ -13,8 +13,8 @@ from transformers import (
 from .config import VisionLanguageConfig
 from .projector import build_vision_projector
 from .newline import NewlineTokenInserter
-from .resampler.mamba_ssm.modules.mamba_compressor import MambaCompressor
-from src.constant import (
+
+from .constant import (
     IGNORE_INDEX,
     IMAGE_TOKEN_INDEX,
     DEFAULT_IMAGE_TOKEN,
@@ -44,12 +44,16 @@ class CustomVLMModel(PreTrainedModel):
         self.vision_dtype = vision_dtype
         self.llm_dtype    = llm_dtype
         # 1) Vision encoder --------------------------------------------------
-        self.vision_encoder = AutoModel.from_pretrained(
+        vision_model = AutoModel.from_pretrained(
             config.vision_model_name,
             torch_dtype=vision_dtype,
         ).to(vision_dtype)
+        # Check if vision_model attribute exists
+        if hasattr(vision_model, 'vision_model'):
+            self.vision_encoder = vision_model.vision_model
+        else:
+            self.vision_encoder = vision_model
         d_v = self.config.vision_config.hidden_size
-        
         
         # 6) Language model -------------------------------------------------
         self.llm = AutoModelForCausalLM.from_pretrained(
@@ -64,10 +68,10 @@ class CustomVLMModel(PreTrainedModel):
             projector_type=config.projector_type,
             vision_cfg=self.config.vision_config,
         ).to(vision_dtype)
-        print("dytpe:", vision_dtype)
         # 3) Optional resampler ---------------------------------------------
         if getattr(config, "use_resampler", False):
-            self.resampler = MambaCompressor(d_model=d_l, n_layer=1, fp32=False)
+            from .resampler.mamba_ssm.modules.mamba_compressor import MambaCompressor
+            self.resampler = MambaCompressor(d_model=d_l, n_layer=4, fp32=False)
         else:
             self.resampler = None
         print(f"Vision encoder: {self.vision_encoder.__class__.__name__}","LLM: ", self.llm.__class__.__name__)
@@ -196,11 +200,22 @@ class CustomVLMModel(PreTrainedModel):
     # VISION → PROJECTOR
     # ------------------------------------------------------------------ #
     def _get_vision_embeds(self, pixel_values: torch.FloatTensor) -> torch.FloatTensor:
-        """Vision encoder → (optional) resampler → projector → LLM‑space embeds."""
-        v_feat = self.vision_encoder(pixel_values=pixel_values).last_hidden_state  # (B*num_frames,N,d_v)
-        v_emb = self.projector(v_feat)  # (B*num_frames,N',d_l)
-        # print(f"비전 임베딩 모양: {v_emb.shape}")  # 디버깅
-        return v_emb  # (B*num_frames,N',d_l)
+        """Vision encoder → (optional) resampler → projector → LLM‑space embeds.
+        Handles both 4D (B, C, H, W) and 5D (B, T, C, H, W) inputs.
+        """
+        # Check if input is 5D (batch, frames, channels, height, width)
+        is_video = pixel_values.dim() == 5
+        
+        if is_video:
+            B, T, C, H, W = pixel_values.shape
+            # Reshape to (B*T, C, H, W) for vision encoder
+            pixel_values = pixel_values.view(B * T, C, H, W)
+        
+        # Process through vision encoder
+        v_feat = self.vision_encoder(pixel_values=pixel_values).last_hidden_state  # (B*T, N, d_v)
+        v_emb = self.projector(v_feat)  # (B*T, N', d_l)
+        
+        return v_emb  # (B*T, N', d_l)
     
     def _get_2dPool(self, features: torch.FloatTensor, stride: int = 2):
         """ViT patch token을 2‑D grid 로 reshape 후 pooling."""
@@ -365,50 +380,37 @@ class CustomVLMModel(PreTrainedModel):
         pad_embeds = torch.stack(pad_embeds, dim=0)
         return pad_embeds, pad_labels, pad_mask, pos_ids
 
-    # ------------------------------------------------------------------ #
-    # FORWARD
-    # ------------------------------------------------------------------ #
-    def forward(
+    def _prepare_multimodal_inputs(
         self,
         pixel_values: torch.FloatTensor,
         input_ids: torch.LongTensor,
         attention_mask: Optional[torch.LongTensor] = None,
         labels: Optional[torch.LongTensor] = None,
-        **kwargs,
-    ):
-        # 토큰 전처리
+        ):
+        """forward와 generate에서 공통적으로 사용되는 입력 전처리 로직"""
+        # 1. 토큰 전처리
         processed_input_ids = self.preprocess_image_tokens(input_ids)
         if labels is not None:
             processed_labels = self.preprocess_image_tokens(labels)
         else:
             processed_labels = processed_input_ids.clone()
         
-
+        # 2. 비전 인코딩
         self.current_batch_size = processed_input_ids.size(0)
-        # print(f"현재 배치 크기: {self.current_batch_size}")  # 디버깅
-        # 비전 인코딩
         v_embs = self._get_vision_embeds(pixel_values)  # (B*num_samples, N', d_l)
         
-        v_embs = list(torch.split(v_embs,self.current_batch_size,dim=0))  # (B, num_samples, N', d_l)
+        # 3. v_embs 배치 처리
+        v_embs = list(torch.split(v_embs, self.current_batch_size, dim=0))  # (B, num_samples, N', d_l)
         
         for i, v_emb in enumerate(v_embs):
-            # 비전 임베딩 풀링
+            # 4. 비전 임베딩 풀링
             if self.config.mm_spatial_pool_mode != "none":
-                v_emb = self._get_2dPool(v_emb, stride=2) # (num_samples * N', d_l)
-                # print(f"풀링 후 비전 임베딩 모양: {v_emb.shape}")            
-            v_emb = self.newline_inserter(v_emb, self.image_newline) # (num_samples * N'+ New line tokens, d_l)
+                v_emb = self._get_2dPool(v_emb, stride=2)
+            # 5. 줄바꿈 토큰 삽입
+            v_emb = self.newline_inserter(v_emb, self.image_newline)
             v_embs[i] = v_emb
-        # print(f"조정된 이미지 임베딩 모양: {v_emb.shape}")  # 디버깅
         
-        # 이미지 토큰 대체
-        # processed_input_ids: (B, L)
-        # processed_labels: (B, L)
-        # attention_mask: (B, L)
-        # v_embs: list[(num_samples * N'+ New line tokens, d_l),...]
-        # print(f"전처리된 레이블 ID 모양: {processed_labels.shape}")  # 디버깅
-        # print(f"전처리된 어텐션 마스크 모양: {attention_mask.shape}")
-        # print(f"비전 임베딩 모양: {len(v_embs)},{v_embs[0].shape}")  # 디버깅
-        # print("=================")  
+        # 6. 이미지 토큰 대체
         inp_emb, pad_lbl, pad_mask, pos_ids = self._replace_image_tokens_with_features(
             input_ids=processed_input_ids,
             labels=processed_labels,
@@ -420,10 +422,26 @@ class CustomVLMModel(PreTrainedModel):
             max_length=self.config.language_config.max_position_embeddings,
             padding_side=self.tokenizer.padding_side,
         )
-        # print(f"전처리된 입력 ID 모양: {inp_emb.shape}")  # 디버깅
-        # print(f"전처리된 레이블 ID 모양: {pad_lbl.shape}")
-        # print(f"전처리된 어텐션 마스크 모양: {pad_mask.shape}")
-        # print(f"전처리된 포지션 ID 모양: {pos_ids.shape}")
+        
+        return inp_emb, pad_lbl, pad_mask, pos_ids
+
+    def forward(
+        self,
+        pixel_values: torch.FloatTensor,
+        input_ids: torch.LongTensor,
+        attention_mask: Optional[torch.LongTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        **kwargs,
+    ):
+        # 공통 입력 전처리 메서드 호출
+        inp_emb, pad_lbl, pad_mask, pos_ids = self._prepare_multimodal_inputs(
+            pixel_values=pixel_values,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            labels=labels
+        )
+        
+        # LLM 모델 호출
         return self.llm(
             inputs_embeds=inp_emb,
             attention_mask=pad_mask if attention_mask is not None else None,
@@ -431,7 +449,7 @@ class CustomVLMModel(PreTrainedModel):
             labels=pad_lbl,
             return_dict=True,
         )
-    
+
     @torch.no_grad()
     def generate(
         self,
@@ -440,59 +458,26 @@ class CustomVLMModel(PreTrainedModel):
         attention_mask: Optional[torch.LongTensor] = None,
         **generate_kwargs
     ):
-        """forward와 동일한 전처리 과정을 거친 후 자동회귀적 생성 수행"""
-        
-        # 1. 토큰 전처리 (forward와 동일)
-        processed_input_ids = self.preprocess_image_tokens(input_ids)
-        
-        # 2. 비전 인코딩 (forward와 동일)
-        v_emb = self._get_vision_embeds(pixel_values)  # (B, N', d_l)
-        
-        # 3. 비전 임베딩 풀링 (forward와 동일)
-        if self.config.mm_spatial_pool_mode != "none":
-            v_emb = self._get_2dPool(v_emb, stride=2)
-        # 4. 줄바꿈 토큰 삽입 (forward와 동일)
-        v_emb = self.newline_inserter(v_emb, self.image_newline)
-        # print(f"조정된 이미지 임베딩 모양: {v_emb.shape}")  # 디버깅
-        # 5. 배치 차원 추가 (forward와 동일)
-        if len(v_emb.shape) == 2:
-            B = processed_input_ids.size(0)
-            v_emb = v_emb.unsqueeze(0)
-            if B > 1:
-                v_emb = v_emb.expand(B, -1, -1)
-        
-        # 6. 이미지 토큰 대체 (labels는 generate에서 필요 없으므로 None 사용)
-        inp_emb, _, pad_mask, pos_ids = self._replace_image_tokens_with_features(
-            input_ids=processed_input_ids,
-            labels=processed_input_ids.clone(),  # generate에서는 labels 무시됨
-            attention_mask=attention_mask,
-            image_features=v_emb,
-            embed_tokens_fn=self.llm.get_input_embeddings(),
-            image_token_index=IMAGE_TOKEN_INDEX,
-            ignore_index=IGNORE_INDEX,
-            max_length=self.config.language_config.max_position_embeddings,
-            padding_side=self.tokenizer.padding_side,
+        # 공통 입력 전처리 메서드 호출
+        inp_emb, _, pad_mask, pos_ids = self._prepare_multimodal_inputs(
+            pixel_values=pixel_values,
+            input_ids=input_ids,
+            attention_mask=attention_mask
         )
         
-        # 7. 임베딩 기반 생성을 위한 LLM 준비
-        # HuggingFace 모델의 생성은 일반적으로 input_ids를 사용하지만,
-        # 우리는 이미 embedding을 준비했으므로 custom_inputs를 통해 전달
-        
-        # 일부 모델은 input_embeds를 직접 지원하지 않을 수 있어 prepare_inputs_for_generation 활용
+        # generate에 필요한 model_kwargs 구성
         model_kwargs = {
             "inputs_embeds": inp_emb,
             "attention_mask": pad_mask if attention_mask is not None else None,
             "position_ids": pos_ids,
         }
         
-        # 8. 생성 수행 (원래 GenerationMixin.generate 호출)
-        # LLM의 generate 메소드를 활용하되, custom_inputs를 통해 임베딩 전달
+        # 생성 수행
         outputs = self.llm.generate(
             input_ids=None,  # input_ids 대신 inputs_embeds 사용
             **model_kwargs,
             **generate_kwargs
         )
-        
         return outputs
 if __name__ == "__main__":
     vision = ["facebook/dino-vitb16"]
