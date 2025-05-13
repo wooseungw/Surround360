@@ -1,15 +1,15 @@
 # wandb 설정
 wandb:
     project: "Surround360"
-    name: "surround_360_training"
+    name: "surround_360_freezebackbone"
 
 # 모델 설정
 model:
     name: "surround"
     pretrain_name: "Salesforce/blip2-opt-2.7b" # HuggingFace 형식으로 저장된 경로
-    save_dir: "saved_models/surround_360"
+    save_dir: "saved_models/surround_360_freezevision"
     max_new_tokens: 128 # 최대 생성 토큰 수
-    num_query_tokens: 128 # Q-Former의 쿼리 토큰 수 original: 32
+    num_query_tokens: 32 # Q-Former의 쿼리 토큰 수 original: 32
     qformer:
         hidden_size: 768 # 원하는 Q-Former 레이어 수로 변경 original: 768
 
@@ -31,14 +31,14 @@ deepspeed:
 
 # 학습 설정
 training:
-    output_dir: "outputs/surround_360"
+    output_dir: "outputs/surround_360_freezevision"
     run_name: "surround_360"
-    num_epochs: 50
+    num_epochs: 10
     batch_size:
-        train: 1
-        eval: 2
-    gradient_accumulation_steps: 1 # 효과적인 배치 크기 16
-    dataloader_num_workers: 0 # CPU 병렬 처리 추가
+        train: 8
+        eval: 16
+    gradient_accumulation_steps: 2 # 효과적인 배치 크기 16
+    dataloader_num_workers: 8 # CPU 병렬 처리 추가
     gradient_checkpointing: true # 메모리 최적화
 
     # 학습률 및 최적화
