@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from transformers import Trainer
 
 class ContrastiveMatchingTrainer(Trainer):
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False,**kwargs):
         # === (A) 언어모델 손실 ===
         outputs = model(
             pixel_values  = inputs["pixel_values"].to(model.device),
