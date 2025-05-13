@@ -95,9 +95,9 @@ class QuIC360Dataset(Dataset):
         
         # 정답을 전처리합니다.
         labels = inputs.input_ids.clone()
-        q_len = len(self.processor(prompt).input_ids)  # 질문+<image> token 개수
+        q_len = len(self.processor.tokenizer(prompt).input_ids)  # 질문+<image> token 개수
         labels[:, :q_len] = IGNORE_INDEX
-        labels[labels == self.processor.pad_token_id] = IGNORE_INDEX
+        labels[labels == self.processor.tokenizer.pad_token_id] = IGNORE_INDEX
         
         # Hugging Face Trainer가 기대하는 평평한 구조로 반환
         return {
