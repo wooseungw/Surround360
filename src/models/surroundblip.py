@@ -2074,6 +2074,10 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
     def get_decoder(self):
         return self.language_model.get_decoder()
 
+    def get_image_features(self):
+        return self.vision_model.get_image_features()
+        
+
     def _tie_weights(self):
         if not self.config.use_decoder_only_language_model:
             self.language_model.encoder.embed_tokens = self.language_model.shared
@@ -2399,7 +2403,7 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         outputs = self.language_model.generate(**inputs, **generate_kwargs)
         return outputs
 
-
+    
 
 
 __all__ = [
