@@ -1,0 +1,56 @@
+# 모델 설정
+wandb:
+    project: "Surround360"
+    name: "blip2_360_training"
+
+model:
+    name: "test"
+    vision_model_name: "facebook/dinov2-small"
+    llm_model_name: "Qwen/Qwen3-0.6B"
+    projector_type: "mlp2x_gelu"
+    use_resampler: true
+    mm_spatial_pool_mode: "average"
+    mm_newline_position: "grid"
+    freeze_vision: true
+    freeze_llm: true
+
+data:
+    csv_file: "data/quic360/train.csv"
+    do_crop: true
+    crop_size: [ 224, 224 ]
+    fov: 90
+    overlap_ratio: 0.5
+
+# 학습 설정
+training:
+    output_dir: "outputs/{model_name}"
+    run_name: "{model_name}_baseline"
+    num_train_epochs: 10
+    batch_size:
+        train: 16
+        eval: 16
+    gradient_accumulation_steps: 1 # 효과적인 배치 크기 16
+    dataloader_num_workers: 16 # CPU 병렬 처리 추가
+    gradient_checkpointing: true # 메모리 최적화
+    # 학습률 및 최적화
+    learning_rate: 2e-5
+    warmup_ratio: 0.1 # warmup 단계 추가
+    weight_decay: 0.01
+
+    # 로깅 및 저장 설정
+    logging_dir: "logs/{model_name}"
+    logging_steps: 4 # 더 자주 로깅
+    eval_strategy: "steps" # step 기반으로 변경
+    eval_steps: 50 # 500 step마다 평가
+    save_strategy: "steps" # step 기반 저장
+    save_steps: 50
+    save_total_limit: 3 # 최대 3개 체크포인트 유지
+    load_best_model_at_end: true
+    metric_for_best_model: "eval_loss" # 최상의 모델 기준
+    greater_is_better: false
+
+    # 보고 설정
+    report_to: "wandb"
+
+    # 추가 최적화
+    max_grad_norm: 1.0 # gradient clipping

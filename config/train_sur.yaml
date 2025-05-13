@@ -8,10 +8,10 @@ model:
     name: "surround"
     pretrain_name: "Salesforce/blip2-opt-2.7b" # HuggingFace 형식으로 저장된 경로
     save_dir: "saved_models/surround_360"
-    max_new_tokens: 50 # 최대 생성 토큰 수
+    max_new_tokens: 128 # 최대 생성 토큰 수
     num_query_tokens: 128 # Q-Former의 쿼리 토큰 수 original: 32
     qformer:
-        hidden_size: 1024 # 원하는 Q-Former 레이어 수로 변경 original: 768
+        hidden_size: 768 # 원하는 Q-Former 레이어 수로 변경 original: 768
 
 # 데이터 설정
 data:
@@ -19,7 +19,7 @@ data:
     train_file: "train.csv"
     valid_file: "valid.csv"
     image_size: [ 224, 224 ]
-    max_length: 256
+    max_length: 50
     do_crop: true
     fov: 90 # FOV 설정
     overlap_ratio: 0.5
@@ -35,10 +35,10 @@ training:
     run_name: "surround_360"
     num_epochs: 50
     batch_size:
-        train: 64
-        eval: 256
+        train: 1
+        eval: 2
     gradient_accumulation_steps: 1 # 효과적인 배치 크기 16
-    dataloader_num_workers: 16 # CPU 병렬 처리 추가
+    dataloader_num_workers: 0 # CPU 병렬 처리 추가
     gradient_checkpointing: true # 메모리 최적화
 
     # 학습률 및 최적화
@@ -50,9 +50,9 @@ training:
     logging_dir: "logs/blip2_360"
     logging_steps: 4 # 더 자주 로깅
     eval_strategy: "steps" # step 기반으로 변경
-    eval_steps: 50 # 500 step마다 평가
+    eval_steps: 100 # 500 step마다 평가
     save_strategy: "steps" # step 기반 저장
-    save_steps: 50
+    save_steps: 100
     save_total_limit: 3 # 최대 3개 체크포인트 유지
     load_best_model_at_end: true
     metric_for_best_model: "eval_loss" # 최상의 모델 기준

@@ -1,3 +1,3 @@
 
 
-python train.py --config config/train_config.yaml
+python train.py --config config/train_sur.yaml

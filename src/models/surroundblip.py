@@ -2039,7 +2039,7 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
 
         self.query_tokens = nn.Parameter(torch.zeros(1, config.num_query_tokens, config.qformer_config.hidden_size))
         print("init_ query_tokens", self.query_tokens.shape)
-        self.qformer = Blip2QFormerModel(config.qformer_config)
+        self.qformer = MambaCompressor(config.qformer_config)
 
         self.language_projection = nn.Linear(config.qformer_config.hidden_size, config.text_config.hidden_size)
         if config.use_decoder_only_language_model:
@@ -2195,6 +2195,7 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         image_embeds = vision_outputs[0]
         
         # (B*P, S, D) -> flatten P and S dims to (B, P*S, D)
+        # (B, P, S, D) -> (B, P, S', D) S=196 S' = 64
         S, D = image_embeds.shape[1], image_embeds.shape[2]
         image_embeds = image_embeds.view(B, P * S, D)
         
