@@ -21,7 +21,6 @@ from typing import Any, Optional, Tuple, Union
 import torch
 import torch.utils.checkpoint
 from torch import nn
-import torch.nn.functional as F
 from torch.nn import CrossEntropyLoss
 
 from transformers.activations import ACT2FN
@@ -2141,7 +2140,6 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         return_dict: Optional[bool] = None,
         interpolate_pos_encoding: bool = False,
         use_cache: Optional[bool] = None,
-        overlap_consistency_weight: float = 0.5,  # 일관성 손실의 가중치
     ) -> Union[Tuple, Blip2ForConditionalGenerationModelOutput]:
         r"""
         Returns:
@@ -2220,34 +2218,8 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
             return_dict=return_dict,
             interpolate_pos_encoding=interpolate_pos_encoding,
         )
-        _ , S, D = vision_outputs[0].shape
         image_embeds = vision_outputs[0]
-        # 원본 (B*P, S, D) 형태의 image_embeds를 유지
-        original_image_embeds = vision_outputs[0]  # (B*P, S, D)
         
-        # 오버랩 일관성 손실 계산
-        overlap_loss = 0.0
-        half_size = S // 2  # 정수 나눗셈
-        if P > 1:  # 여러 패치가 있을 때만 계산
-            # 원본 이미지 임베딩을 (B, P, S, D) 형태로 재구성
-            reshaped_embeds = original_image_embeds.view(B, P, S, D)
-            
-            # FOV 90도, 오버랩 0.5 가정 시 인접한 패치 간 절반이 겹침
-            # 각 패치 쌍에 대해 일관성 손실 계산
-            for i in range(P-1):
-                # 현재 패치의 오른쪽 절반과 다음 패치의 왼쪽 절반 간 손실 계산
-                # S//4는 패치 너비의 1/4 지점, 3*S//4는 패치 너비의 3/4 지점
-                # (각 패치가 90도 FOV이고 0.5 오버랩이므로, 절반씩 겹침)
-                curr_patch_right_half = reshaped_embeds[:, i, -half_size:, :]  # 현재 패치의 오른쪽 half_size개
-                next_patch_left_half = reshaped_embeds[:, i+1, :half_size, :]  # 다음 패치의 왼쪽 half_size개
-        
-                patch_loss = F.mse_loss(curr_patch_right_half, next_patch_left_half, reduction='mean')
-                # 또는 코사인 유사도 사용: 1 - F.cosine_similarity(curr_patch_right_half.flatten(1), next_patch_left_half.flatten(1), dim=1).mean()
-                
-                overlap_loss += patch_loss
-            
-            # 패치 쌍 수로 정규화
-            overlap_loss = overlap_loss / (P - 1)
         # (B*P, S, D) -> flatten P and S dims to (B, P*S, D)
         # (B, P, S, D) -> (B, P, S', D) S=196 S' = 64
         S, D = image_embeds.shape[1], image_embeds.shape[2]
@@ -2336,11 +2308,7 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
             loss = outputs.loss
             logits = outputs.logits
             outputs = outputs.to_tuple() if not return_dict else outputs
-            # 기존 손실에 오버랩 일관성 손실 추가
-            if loss is not None:
-                loss = loss + overlap_consistency_weight * overlap_loss
-            else:
-                loss = overlap_consistency_weight * overlap_loss
+
         if not return_dict:
             output = (logits, vision_outputs, query_outputs, outputs)
             return ((loss,) + output) if loss is not None else output
