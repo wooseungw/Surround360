@@ -11,7 +11,7 @@ model:
     use_resampler: false # 리샘플러 사용 여부
     mm_spatial_pool_mode: "average" # 공간 풀링 모드
     mm_newline_position: "grid" # 뉴라인 위치
-    freeze_vision: false # 비전 모델 고정 여부
+    freeze_vision: true # 비전 모델 고정 여부
     freeze_llm: true # 언어 모델 고정 여부
 
 dataset:
