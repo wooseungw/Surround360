@@ -2047,13 +2047,7 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
             language_model = AutoModelForCausalLM.from_config(config.text_config)
         else:
             language_model = AutoModelForSeq2SeqLM.from_config(config.text_config)
-        
-        self.vicreg_loss = VICRegLoss(
-            sim_coef=getattr(config, "vicreg_sim_coef", 25.0),
-            var_coef=getattr(config, "vicreg_var_coef", 25.0),
-            cov_coef=getattr(config, "vicreg_cov_coef", 1.0)
-        )
-        
+
         # Update _tied_weights_keys using the base model used.
         if language_model._tied_weights_keys is not None:
             self._tied_weights_keys = [f"language_model.{k}" for k in language_model._tied_weights_keys]
@@ -2232,48 +2226,28 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         original_image_embeds = vision_outputs[0]  # (B*P, S, D)
         
         # 오버랩 일관성 손실 계산
-        # VICReg 손실 계산
         overlap_loss = 0.0
-        vicreg_losses = {}
         half_size = S // 2  # 정수 나눗셈
-        
         if P > 1:  # 여러 패치가 있을 때만 계산
             # 원본 이미지 임베딩을 (B, P, S, D) 형태로 재구성
             reshaped_embeds = original_image_embeds.view(B, P, S, D)
             
-            # 각 패치 쌍에 대해 VICReg 손실 계산
-            vicreg_total_loss = 0.0
-            num_pairs = 0
-            
+            # FOV 90도, 오버랩 0.5 가정 시 인접한 패치 간 절반이 겹침
+            # 각 패치 쌍에 대해 일관성 손실 계산
             for i in range(P-1):
-                # 현재 패치의 오른쪽 절반과 다음 패치의 왼쪽 절반
-                curr_patch_right_half = reshaped_embeds[:, i, -half_size:, :]  # (B, half_size, D)
-                next_patch_left_half = reshaped_embeds[:, i+1, :half_size, :]  # (B, half_size, D)
+                # 현재 패치의 오른쪽 절반과 다음 패치의 왼쪽 절반 간 손실 계산
+                # S//4는 패치 너비의 1/4 지점, 3*S//4는 패치 너비의 3/4 지점
+                # (각 패치가 90도 FOV이고 0.5 오버랩이므로, 절반씩 겹침)
+                curr_patch_right_half = reshaped_embeds[:, i, -half_size:, :]  # 현재 패치의 오른쪽 half_size개
+                next_patch_left_half = reshaped_embeds[:, i+1, :half_size, :]  # 다음 패치의 왼쪽 half_size개
+        
+                patch_loss = F.mse_loss(curr_patch_right_half, next_patch_left_half, reduction='mean')
+                # 또는 코사인 유사도 사용: 1 - F.cosine_similarity(curr_patch_right_half.flatten(1), next_patch_left_half.flatten(1), dim=1).mean()
                 
-                # VICReg 손실 계산
-                patch_loss, patch_losses = self.vicreg_loss(curr_patch_right_half, next_patch_left_half)
-                
-                vicreg_total_loss += patch_loss
-                num_pairs += 1
-                
-                # 각 손실 컴포넌트 추적 (선택적)
-                for k, v in patch_losses.items():
-                    vicreg_losses[f"{k}_{i}"] = v
+                overlap_loss += patch_loss
             
             # 패치 쌍 수로 정규화
-            if num_pairs > 0:
-                overlap_loss = vicreg_total_loss / num_pairs
-                
-                # 평균 손실 컴포넌트 계산
-                sim_losses = [vicreg_losses[f"sim_loss_{i}"] for i in range(num_pairs)]
-                var_losses = [vicreg_losses[f"var_loss_{i}"] for i in range(num_pairs)]
-                cov_losses = [vicreg_losses[f"cov_loss_{i}"] for i in range(num_pairs)]
-                
-                vicreg_losses = {
-                    "sim_loss": sum(sim_losses) / num_pairs,
-                    "var_loss": sum(var_losses) / num_pairs,
-                    "cov_loss": sum(cov_losses) / num_pairs
-                }
+            overlap_loss = overlap_loss / (P - 1)
         # (B*P, S, D) -> flatten P and S dims to (B, P*S, D)
         # (B, P, S, D) -> (B, P, S', D) S=196 S' = 64
         S, D = image_embeds.shape[1], image_embeds.shape[2]
