@@ -2222,7 +2222,7 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         image_embeds = vision_outputs[0]
         # 원본 (B*P, S, D) 형태의 image_embeds를 유지
         original_image_embeds = vision_outputs[0]  # (B*P, S, D)
-        
+        print("image_embeds", image_embeds.shape)
         # 오버랩 일관성 손실 계산
         overlap_loss = 0.0
         if P > 1:  # 여러 패치가 있을 때만 계산
