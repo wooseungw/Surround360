@@ -2227,6 +2227,7 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         
         # 오버랩 일관성 손실 계산
         overlap_loss = 0.0
+        half_size = S // 2  # 정수 나눗셈
         if P > 1:  # 여러 패치가 있을 때만 계산
             # 원본 이미지 임베딩을 (B, P, S, D) 형태로 재구성
             reshaped_embeds = original_image_embeds.view(B, P, S, D)
@@ -2237,9 +2238,9 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
                 # 현재 패치의 오른쪽 절반과 다음 패치의 왼쪽 절반 간 손실 계산
                 # S//4는 패치 너비의 1/4 지점, 3*S//4는 패치 너비의 3/4 지점
                 # (각 패치가 90도 FOV이고 0.5 오버랩이므로, 절반씩 겹침)
-                curr_patch_right_half = reshaped_embeds[:, i, S//2:, :]  # 현재 패치의 오른쪽 절반
-                next_patch_left_half = reshaped_embeds[:, i+1, :S//2, :]  # 다음 패치의 왼쪽 절반
-                
+                curr_patch_right_half = reshaped_embeds[:, i, -half_size:, :]  # 현재 패치의 오른쪽 half_size개
+                next_patch_left_half = reshaped_embeds[:, i+1, :half_size, :]  # 다음 패치의 왼쪽 half_size개
+        
                 patch_loss = F.mse_loss(curr_patch_right_half, next_patch_left_half, reduction='mean')
                 # 또는 코사인 유사도 사용: 1 - F.cosine_similarity(curr_patch_right_half.flatten(1), next_patch_left_half.flatten(1), dim=1).mean()
                 
