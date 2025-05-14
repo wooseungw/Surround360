@@ -44,7 +44,7 @@ from transformers.utils import (
 )
 from transformers import AutoModelForCausalLM, AutoModelForSeq2SeqLM
 from .configuration_blip_2 import Blip2Config, Blip2QFormerConfig, Blip2VisionConfig
-
+from loss.vicreg import VICRegLoss
 
 logger = logging.get_logger(__name__)
 
