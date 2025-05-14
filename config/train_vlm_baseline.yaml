@@ -8,7 +8,7 @@ model:
     vision_model_name: "facebook/dinov2-small" # 비전 모델
     llm_model_name: "Qwen/Qwen3-0.6B" # 언어 모델
     projector_type: "mlp2x_gelu" # 프로젝터 유형 (mlp, linear)
-    use_resampler: false # 리샘플러 사용 여부
+    use_resampler: true # 리샘플러 사용 여부
     mm_spatial_pool_mode: "average" # 공간 풀링 모드
     mm_newline_position: "grid" # 뉴라인 위치
     freeze_vision: true # 비전 모델 고정 여부
