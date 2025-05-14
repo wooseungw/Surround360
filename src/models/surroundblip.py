@@ -21,8 +21,6 @@ from typing import Any, Optional, Tuple, Union
 import torch
 import torch.utils.checkpoint
 from torch import nn
-import torch.nn.functional as F
-from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 from torch.nn import CrossEntropyLoss
 
 from transformers.activations import ACT2FN
@@ -2142,70 +2140,9 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         return_dict: Optional[bool] = None,
         interpolate_pos_encoding: bool = False,
         use_cache: Optional[bool] = None,
-        overlap_consistency_weight: Optional[float] = None,
+        overlap_consistency_weight: float = 0.5,  # 일관성 손실의 가중치
     ) -> Union[Tuple, Blip2ForConditionalGenerationModelOutput]:
-        r"""
-        Returns:
-
-        Examples:
-
-        Prepare processor, model and image input
-
-        ```python
-        >>> from PIL import Image
-        >>> import requests
-        >>> from transformers import Blip2Processor, Blip2ForConditionalGeneration
-        >>> import torch
-
-        >>> device = "cuda" if torch.cuda.is_available() else "cpu"
-
-        >>> processor = Blip2Processor.from_pretrained("Salesforce/blip2-opt-2.7b")
-        >>> model = Blip2ForConditionalGeneration.from_pretrained(
-        ...     "Salesforce/blip2-opt-2.7b", load_in_8bit=True, device_map={"": 0}, torch_dtype=torch.float16
-        ... )  # doctest: +IGNORE_RESULT
-
-        >>> url = "http://images.cocodataset.org/val2017/000000039769.jpg"
-        >>> image = Image.open(requests.get(url, stream=True).raw)
-        ```
-
-        Image captioning (without providing a text prompt):
-
-        ```python
-        >>> inputs = processor(images=image, return_tensors="pt").to(device, torch.float16)
-
-        >>> generated_ids = model.generate(**inputs)
-        >>> generated_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
-        >>> print(generated_text)
-        two cats laying on a couch
-        ```
-
-        Visual question answering (prompt = question):
-
-        ```python
-        >>> prompt = "Question: how many cats are there? Answer:"
-        >>> inputs = processor(images=image, text=prompt, return_tensors="pt").to(device="cuda", dtype=torch.float16)
-
-        >>> generated_ids = model.generate(**inputs)
-        >>> generated_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
-        >>> print(generated_text)
-        two
-        ```
-
-        Note that int8 inference is also supported through [bitsandbytes](https://github.com/TimDettmers/bitsandbytes).
-        This greatly reduces the amount of memory used by the model while maintaining the same performance.
-
-        ```python
-        >>> model = Blip2ForConditionalGeneration.from_pretrained(
-        ...     "Salesforce/blip2-opt-2.7b", load_in_8bit=True, device_map={"": 0}, torch_dtype=torch.bfloat16
-        ... )  # doctest: +IGNORE_RESULT
-
-        >>> inputs = processor(images=image, text=prompt, return_tensors="pt").to(device="cuda", dtype=torch.bfloat16)
-
-        >>> generated_ids = model.generate(**inputs)
-        >>> generated_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
-        >>> print(generated_text)
-        two
-        ```"""
+       
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         # step 0: remove patch dimensions from pixel_values
         # print("pixel_values", pixel_values.shape)
@@ -2221,8 +2158,10 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
             return_dict=return_dict,
             interpolate_pos_encoding=interpolate_pos_encoding,
         )
+        image_embeds = vision_outputs[0]
+        # 원본 (B*P, S, D) 형태의 image_embeds를 유지
         original_image_embeds = vision_outputs[0]  # (B*P, S, D)
-    
+        
         # 오버랩 일관성 손실 계산
         overlap_loss = 0.0
         if P > 1:  # 여러 패치가 있을 때만 계산
@@ -2238,16 +2177,16 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
                 curr_patch_right_half = reshaped_embeds[:, i, S//2:, :]  # 현재 패치의 오른쪽 절반
                 next_patch_left_half = reshaped_embeds[:, i+1, :S//2, :]  # 다음 패치의 왼쪽 절반
                 
-                loss_fct = CrossEntropyLoss(reduction="mean")
                 # 일관성 손실: MSE 또는 코사인 유사도 손실
-                patch_loss = loss_fct(curr_patch_right_half.flatten(1), next_patch_left_half.flatten(1))
+                patch_loss_fn = CrossEntropyLoss(reduction="mean")
+                
+                patch_loss = patch_loss_fn(curr_patch_right_half, next_patch_left_half)
                 # 또는 코사인 유사도 사용: 1 - F.cosine_similarity(curr_patch_right_half.flatten(1), next_patch_left_half.flatten(1), dim=1).mean()
                 
                 overlap_loss += patch_loss
             
             # 패치 쌍 수로 정규화
             overlap_loss = overlap_loss / (P - 1)
-        
         # (B*P, S, D) -> flatten P and S dims to (B, P*S, D)
         # (B, P, S, D) -> (B, P, S', D) S=196 S' = 64
         S, D = image_embeds.shape[1], image_embeds.shape[2]
@@ -2336,12 +2275,11 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
             loss = outputs.loss
             logits = outputs.logits
             outputs = outputs.to_tuple() if not return_dict else outputs
-                # 기존 손실에 오버랩 일관성 손실 추가
+            # 기존 손실에 오버랩 일관성 손실 추가
             if loss is not None:
                 loss = loss + overlap_consistency_weight * overlap_loss
             else:
                 loss = overlap_consistency_weight * overlap_loss
-                
         if not return_dict:
             output = (logits, vision_outputs, query_outputs, outputs)
             return ((loss,) + output) if loss is not None else output
