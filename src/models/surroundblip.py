@@ -21,6 +21,7 @@ from typing import Any, Optional, Tuple, Union
 import torch
 import torch.utils.checkpoint
 from torch import nn
+import torch.nn.functional as F
 from torch.nn import CrossEntropyLoss
 
 from transformers.activations import ACT2FN
@@ -2239,10 +2240,7 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
                 curr_patch_right_half = reshaped_embeds[:, i, S//2:, :]  # 현재 패치의 오른쪽 절반
                 next_patch_left_half = reshaped_embeds[:, i+1, :S//2, :]  # 다음 패치의 왼쪽 절반
                 
-                # 일관성 손실: MSE 또는 코사인 유사도 손실
-                patch_loss_fn = CrossEntropyLoss(reduction="mean")
-                
-                patch_loss = patch_loss_fn(curr_patch_right_half, next_patch_left_half)
+                patch_loss = F.mse_loss(curr_patch_right_half, next_patch_left_half, reduction='mean')
                 # 또는 코사인 유사도 사용: 1 - F.cosine_similarity(curr_patch_right_half.flatten(1), next_patch_left_half.flatten(1), dim=1).mean()
                 
                 overlap_loss += patch_loss
