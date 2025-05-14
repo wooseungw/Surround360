@@ -2351,7 +2351,6 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
             vision_outputs=vision_outputs,
             qformer_outputs=query_outputs,
             language_model_outputs=outputs,
-            overlap_loss=overlap_loss if P > 1 else None,  # 새로운 필드 추가
         )
 
     @torch.no_grad()
