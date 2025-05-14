@@ -440,17 +440,6 @@ class CustomVLMModel(PreTrainedModel):
             attention_mask=attention_mask,
             labels=labels
         )
-        # 디버깅 출력 추가
-        non_ignored = (pad_lbl != IGNORE_INDEX).sum().item()
-        total = pad_lbl.numel()
-        print(f"라벨 통계: 학습 대상 토큰 {non_ignored}/{total} ({non_ignored/total*100:.2f}%)")
-        
-        # 첫 번째 배치 항목의 출력 확인
-        if non_ignored == 0:
-            print("경고: 학습 대상 토큰이 없습니다! 모든 라벨이 IGNORE_INDEX입니다.")
-            # 원본 입력/라벨도 함께 출력
-            print("원본 입력:", self.tokenizer.decode(input_ids[0]))
-            print("처리된 라벨:", self.tokenizer.decode(pad_lbl[0][pad_lbl[0] != IGNORE_INDEX]))
         
         # LLM 모델 호출
         return self.llm(

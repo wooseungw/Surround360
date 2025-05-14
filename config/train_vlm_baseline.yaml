@@ -43,7 +43,7 @@ training:
     save_steps: 500 # 저장 단계 (save_strategy가 steps일 때)
     save_total_limit: 3 # 저장할 총 체크포인트 수
     report_to: "wandb" # 보고 대상 (tensorboard, wandb 등)
-    logging_steps: 100 # 로깅 단계
+    logging_steps: 5 # 로깅 단계
     max_grad_norm: 1.0 # 최대 그래디언트 노름
 
 # DeepSpeed 설정 (선택 사항)
