@@ -2231,57 +2231,53 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         # 원본 (B*P, S, D) 형태의 image_embeds를 유지
         original_image_embeds = vision_outputs[0]  # (B*P, S, D)
         
-        # 오버랩 일관성 손실 계산
-        # VICReg 손실 계산
+        # VICReg 손실 계산 부분 수정
         overlap_loss = 0.0
-        vicreg_losses = {}
+        vicreg_losses = {"sim_loss": 0.0, "var_loss": 0.0, "cov_loss": 0.0}
         half_size = S // 2  # 정수 나눗셈
         
         if P > 1:  # 여러 패치가 있을 때만 계산
             # 원본 이미지 임베딩을 (B, P, S, D) 형태로 재구성
             reshaped_embeds = original_image_embeds.view(B, P, S, D)
             
-            # 각 패치 쌍에 대해 VICReg 손실 계산
+            # 메모리 효율성 증가를 위한 선택적 샘플링
+            # 인접한 패치 쌍 중 일부만 샘플링 (최대 4개)
+            sample_step = max(1, (P - 1) // 4)
+            sampled_indices = list(range(0, P-1, sample_step))[:4]
+            
             vicreg_total_loss = 0.0
             num_pairs = 0
             
-            # 인접한 패치 쌍 선택 (모든 쌍이 아니라 일부만)
-            sample_step = max(1, (P - 1) // 4)  # 최대 4개 쌍만 사용
-            sampled_indices = list(range(0, P-1, sample_step))[:4]  # 최대 4개로 제한
-            
+            # 각 샘플링된 패치 쌍에 대해 VICReg 손실 계산
             for i in sampled_indices:
                 # 현재 패치의 오른쪽 절반과 다음 패치의 왼쪽 절반
                 curr_patch_right_half = reshaped_embeds[:, i, -half_size:, :]
                 next_patch_left_half = reshaped_embeds[:, i+1, :half_size, :]
                 
-                # 경량화된 VICReg 손실 계산 (샘플링 비율 적용)
+                # 메모리 효율적인 VICReg 손실 계산
                 patch_loss, patch_losses = self.vicreg_loss(
                     curr_patch_right_half, 
                     next_patch_left_half,
-                    sample_ratio=overlap_consistency_weight
+                    sample_ratio=vicreg_sample_ratio
                 )
                 
                 vicreg_total_loss += patch_loss
                 num_pairs += 1
                 
-                # 첫 번째 쌍의 손실 컴포넌트만 기록 (메모리 절약)
-                if i == sampled_indices[0]:
-                    vicreg_losses = patch_losses
+                # 손실 컴포넌트 누적 (평균 계산용)
+                vicreg_losses["sim_loss"] += patch_losses["sim_loss"]
+                vicreg_losses["var_loss"] += patch_losses["var_loss"]
+                vicreg_losses["cov_loss"] += patch_losses["cov_loss"]
             
             # 패치 쌍 수로 정규화
             if num_pairs > 0:
                 overlap_loss = vicreg_total_loss / num_pairs
-            
-                # 평균 손실 컴포넌트 계산
-                sim_losses = [vicreg_losses[f"sim_loss_{i}"] for i in range(num_pairs)]
-                var_losses = [vicreg_losses[f"var_loss_{i}"] for i in range(num_pairs)]
-                cov_losses = [vicreg_losses[f"cov_loss_{i}"] for i in range(num_pairs)]
                 
-                vicreg_losses = {
-                    "sim_loss": sum(sim_losses) / num_pairs,
-                    "var_loss": sum(var_losses) / num_pairs,
-                    "cov_loss": sum(cov_losses) / num_pairs
-                }
+                # 손실 컴포넌트도 정규화
+                vicreg_losses["sim_loss"] /= num_pairs
+                vicreg_losses["var_loss"] /= num_pairs
+                vicreg_losses["cov_loss"] /= num_pairs
+                
         # (B*P, S, D) -> flatten P and S dims to (B, P*S, D)
         # (B, P, S, D) -> (B, P, S', D) S=196 S' = 64
         S, D = image_embeds.shape[1], image_embeds.shape[2]
