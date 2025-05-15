@@ -2245,25 +2245,33 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
             vicreg_total_loss = 0.0
             num_pairs = 0
             
-            for i in range(P-1):
+            # 인접한 패치 쌍 선택 (모든 쌍이 아니라 일부만)
+            sample_step = max(1, (P - 1) // 4)  # 최대 4개 쌍만 사용
+            sampled_indices = list(range(0, P-1, sample_step))[:4]  # 최대 4개로 제한
+            
+            for i in sampled_indices:
                 # 현재 패치의 오른쪽 절반과 다음 패치의 왼쪽 절반
-                curr_patch_right_half = reshaped_embeds[:, i, -half_size:, :]  # (B, half_size, D)
-                next_patch_left_half = reshaped_embeds[:, i+1, :half_size, :]  # (B, half_size, D)
+                curr_patch_right_half = reshaped_embeds[:, i, -half_size:, :]
+                next_patch_left_half = reshaped_embeds[:, i+1, :half_size, :]
                 
-                # VICReg 손실 계산
-                patch_loss, patch_losses = self.vicreg_loss(curr_patch_right_half, next_patch_left_half)
+                # 경량화된 VICReg 손실 계산 (샘플링 비율 적용)
+                patch_loss, patch_losses = self.vicreg_loss(
+                    curr_patch_right_half, 
+                    next_patch_left_half,
+                    sample_ratio=overlap_consistency_weight
+                )
                 
                 vicreg_total_loss += patch_loss
                 num_pairs += 1
                 
-                # 각 손실 컴포넌트 추적 (선택적)
-                for k, v in patch_losses.items():
-                    vicreg_losses[f"{k}_{i}"] = v
+                # 첫 번째 쌍의 손실 컴포넌트만 기록 (메모리 절약)
+                if i == sampled_indices[0]:
+                    vicreg_losses = patch_losses
             
             # 패치 쌍 수로 정규화
             if num_pairs > 0:
                 overlap_loss = vicreg_total_loss / num_pairs
-                
+            
                 # 평균 손실 컴포넌트 계산
                 sim_losses = [vicreg_losses[f"sim_loss_{i}"] for i in range(num_pairs)]
                 var_losses = [vicreg_losses[f"var_loss_{i}"] for i in range(num_pairs)]
