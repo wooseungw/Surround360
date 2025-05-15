@@ -2258,7 +2258,7 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
                 patch_loss, patch_losses = self.vicreg_loss(
                     curr_patch_right_half, 
                     next_patch_left_half,
-                    sample_ratio=vicreg_sample_ratio
+                    sample_ratio=overlap_consistency_weight
                 )
                 
                 vicreg_total_loss += patch_loss
