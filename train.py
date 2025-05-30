@@ -95,10 +95,20 @@ class QuIC360Dataset(Dataset):
         
         # 정답을 전처리합니다.
         labels = inputs.input_ids.clone()
-        q_len = len(self.processor.tokenizer(prompt).input_ids)  # 질문+<image> token 개수
-        labels[:, :q_len] = IGNORE_INDEX
+        # q_len = len(self.processor.tokenizer(prompt).input_ids)  # 질문+<image> token 개수
+        # labels[:, :q_len] = IGNORE_INDEX
         labels[labels == self.processor.tokenizer.pad_token_id] = IGNORE_INDEX
         
+        # 디버깅 (첫 번째 샘플에 대해서만)
+        if idx == 0:
+            print("==Input sequence==")
+            print(inputs["input_ids"][0])
+            print(self.processor.tokenizer.decode(inputs["input_ids"][0], skip_special_tokens=False))
+            print("==Attention mask==")
+            print(inputs["attention_mask"][0])
+            print("==Labels==")
+            print(labels[0])
+            
         # Hugging Face Trainer가 기대하는 평평한 구조로 반환
         return {
             "pixel_values": inputs["pixel_values"].squeeze(0),  # (Num Crops ,C, H, W)
