@@ -4,7 +4,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 from transformers.training_args import TrainingArguments
 from src.models.surroundblip import SurroundBlip
-from src.trainer.trainer import ContrastiveMatchingTrainer
+
 from transformers import Blip2Processor, Blip2ForConditionalGeneration, Blip2Config, Trainer
 import pandas as pd
 from PIL import Image
