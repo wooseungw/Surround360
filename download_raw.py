@@ -89,12 +89,11 @@ def process_split(
     df['local_path'] = df[url_col].map(url2path)
     df = df[df['local_path'].notna()].copy()
 
-    # 4) URL 컬럼을 "data/{split}/images/{filename}" 로 고정
+    # 4) URL 컬럼을 상대경로로 포맷
     def format_path(p: str):
         fname = os.path.basename(p)
-        # 항상 data/… 로 시작하도록 하려면 out_dir 인자가 "data" 여야 합니다.
-        cur_dir = os.getcwd().split("\\")[-1]
-        return f"{cur_dir}/{out_dir}/{split}/images/{fname}"
+        # data/quic360/train/images/img.jpg 와 같이 고정된 상대경로 반환
+        return os.path.join(out_dir, split, "images", fname)
 
     df[url_col] = df['local_path'].apply(format_path)
     df.drop(columns=['local_path'], inplace=True)
@@ -106,21 +105,21 @@ def process_split(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="raw_dir/*.csv → 이미지 다운로드 + CSV 갱신"
+        description="data/raw/QuIC360/*.csv → 이미지 다운로드 + CSV 갱신"
     )
     parser.add_argument("--splits", nargs="*",
-                        help="처리할 split(예: train test). 생략 시 raw_dir/*.csv 전부")
-    parser.add_argument("--raw_dir", default="raw/QuIC360",
-                        help="원본 CSV 디렉토리")
-    parser.add_argument("--out_dir", default="quic360",
-                        help="출력 베이스 디렉토리 (맨 앞에 붙일 폴더명)")
+                        help="처리할 split 이름(예: train test). 생략 시 raw_dir/*.csv 전부")
+    parser.add_argument("--raw_dir", default="data/raw/QuIC360",
+                        help="원본 CSV 디렉토리 (default: data/raw/QuIC360)")
+    parser.add_argument("--out_dir", default="data/quic360",
+                        help="출력 베이스 디렉토리 (default: data/quic360)")
     parser.add_argument("--url_col", default="url", help="URL 컬럼명")
     parser.add_argument("--max_concurrent", type=int, default=8, help="동시 다운로드 수")
     parser.add_argument("--requests_per_second", type=float, default=0.7, help="초당 요청 수 제한")
     args = parser.parse_args()
 
     raw_dir = Path(args.raw_dir)
-    out_dir = args.out_dir  # 여기서는 문자열 "quic360" 가 되길 기대
+    out_dir = args.out_dir  # e.g. "data/quic360"
 
     if args.splits:
         splits = args.splits

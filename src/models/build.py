@@ -13,7 +13,7 @@ from transformers import (
 from .config import VisionLanguageConfig
 from .projector import build_vision_projector
 from .newline import NewlineTokenInserter
-
+# from .resampler.mamba_ssm.modules.mamba_compressor import MambaCompressor
 from .constant import (
     IGNORE_INDEX,
     IMAGE_TOKEN_INDEX,
@@ -35,11 +35,12 @@ class CustomVLMModel(PreTrainedModel):
     def __init__(
         self,
         config: VisionLanguageConfig,
-        *,
+        tokenizer: AutoTokenizer,
         vision_dtype: torch.dtype = torch.float16, 
-        llm_dtype: torch.dtype = torch.float16
+        llm_dtype: torch.dtype = torch.float16,
+        **kwargs,
         ) -> None:
-        super().__init__(config)
+        super().__init__(config, **kwargs)
         self.config = config
         self.vision_dtype = vision_dtype
         self.llm_dtype    = llm_dtype
@@ -70,8 +71,8 @@ class CustomVLMModel(PreTrainedModel):
         ).to(vision_dtype)
         # 3) Optional resampler ---------------------------------------------
         if getattr(config, "use_resampler", False):
-            from .resampler.mamba_ssm.modules.mamba_compressor import MambaCompressor
-            self.resampler = MambaCompressor(d_model=d_l, n_layer=4, fp32=False)
+            from src.models.resampler.mamba_ssm.modules.mamba_compressor import MambaCompressor
+            self.resampler = MambaCompressor(d_model=d_l, n_layer=1, fp32=False)
         else:
             self.resampler = None
         print(f"Vision encoder: {self.vision_encoder.__class__.__name__}","LLM: ", self.llm.__class__.__name__)
@@ -80,11 +81,11 @@ class CustomVLMModel(PreTrainedModel):
         self.newline_inserter = NewlineTokenInserter(config)
 
         # 5) Tokenizer & special tokens -------------------------------------
-        self.tokenizer = AutoTokenizer.from_pretrained(config.language_model_name)
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-        self.tokenizer.padding_side = "right"
-        self._register_special_tokens()
+        self.tokenizer = tokenizer
+        # if self.tokenizer.pad_token is None:
+        #     self.tokenizer.pad_token = self.tokenizer.eos_token
+        # self.tokenizer.padding_side = "right"
+        # self._register_special_tokens()
         # 7) Optional freezing ----------------------------------------------
         if getattr(config, "freeze_vision", True):
             self._freeze(self.vision_encoder)
@@ -98,74 +99,74 @@ class CustomVLMModel(PreTrainedModel):
     # ------------------------------------------------------------------ #
     # SPECIAL‑TOKEN HANDLING
     # ------------------------------------------------------------------ #
-    def _register_special_tokens(self):
-        """LLaVA 스타일의 특수 토큰 등록 및 커스텀 ID 지정"""
-        # 1. 기존 토크나이저 크기 확인
-        base_vocab_size = len(self.tokenizer)
-        # 3. 추가할 특수 토큰 정의
-        special_tokens = {"additional_special_tokens": [
-            DEFAULT_IMAGE_TOKEN,
-            DEFAULT_IMAGE_PATCH_TOKEN, 
-            DEFAULT_IM_START_TOKEN,
-            DEFAULT_IM_END_TOKEN,
-        ]}
+    # def _register_special_tokens(self):
+    #     """LLaVA 스타일의 특수 토큰 등록 및 커스텀 ID 지정"""
+    #     # 1. 기존 토크나이저 크기 확인
+    #     base_vocab_size = len(self.tokenizer)
+    #     # 3. 추가할 특수 토큰 정의
+    #     special_tokens = {"additional_special_tokens": [
+    #         DEFAULT_IMAGE_TOKEN,
+    #         DEFAULT_IMAGE_PATCH_TOKEN, 
+    #         DEFAULT_IM_START_TOKEN,
+    #         DEFAULT_IM_END_TOKEN,
+    #     ]}
         
-        # 4. 토큰 추가
-        added = self.tokenizer.add_special_tokens(special_tokens)
-        # print(f"추가된 토큰 수: {added}")
+    #     # 4. 토큰 추가
+    #     added = self.tokenizer.add_special_tokens(special_tokens)
+    #     # print(f"추가된 토큰 수: {added}")
         
-        # 5. 토크나이저 타입 확인 (tokenizer.__class__.__name__으로 출력)
-        # print(f"토크나이저 타입: {self.tokenizer.__class__.__name__}")
+    #     # 5. 토크나이저 타입 확인 (tokenizer.__class__.__name__으로 출력)
+    #     # print(f"토크나이저 타입: {self.tokenizer.__class__.__name__}")
         
-        # 6. 토큰-ID 매핑 설정 (BPE 기반 토크나이저 예시)
-        if hasattr(self.tokenizer, 'encoder') and hasattr(self.tokenizer, 'decoder'):
-            # 원하는 매핑 정의 - 여기서는 custom_id를 사용자가 설정
-            custom_id_map = {
-                DEFAULT_IMAGE_TOKEN: base_vocab_size,      # base_vocab_size부터 순차적으로 할당
-                DEFAULT_IMAGE_PATCH_TOKEN: base_vocab_size + 1,
-                DEFAULT_IM_START_TOKEN: base_vocab_size + 2, 
-                DEFAULT_IM_END_TOKEN: base_vocab_size + 3,
-            }
+    #     # 6. 토큰-ID 매핑 설정 (BPE 기반 토크나이저 예시)
+    #     if hasattr(self.tokenizer, 'encoder') and hasattr(self.tokenizer, 'decoder'):
+    #         # 원하는 매핑 정의 - 여기서는 custom_id를 사용자가 설정
+    #         custom_id_map = {
+    #             DEFAULT_IMAGE_TOKEN: base_vocab_size,      # base_vocab_size부터 순차적으로 할당
+    #             DEFAULT_IMAGE_PATCH_TOKEN: base_vocab_size + 1,
+    #             DEFAULT_IM_START_TOKEN: base_vocab_size + 2, 
+    #             DEFAULT_IM_END_TOKEN: base_vocab_size + 3,
+    #         }
             
-            # 매핑 설정
-            for token, custom_id in custom_id_map.items():
-                # 자동 할당된 ID 확인
-                auto_id = self.tokenizer.convert_tokens_to_ids(token)
-                print(f"토큰 '{token}' - 자동 할당 ID: {auto_id}")
+    #         # 매핑 설정
+    #         for token, custom_id in custom_id_map.items():
+    #             # 자동 할당된 ID 확인
+    #             auto_id = self.tokenizer.convert_tokens_to_ids(token)
+    #             print(f"토큰 '{token}' - 자동 할당 ID: {auto_id}")
                 
-                # 자동 할당된 ID 제거
-                if token in self.tokenizer.encoder:
-                    del self.tokenizer.encoder[token]
-                if auto_id in self.tokenizer.decoder:
-                    del self.tokenizer.decoder[auto_id]
+    #             # 자동 할당된 ID 제거
+    #             if token in self.tokenizer.encoder:
+    #                 del self.tokenizer.encoder[token]
+    #             if auto_id in self.tokenizer.decoder:
+    #                 del self.tokenizer.decoder[auto_id]
                 
-                # 커스텀 ID 설정
-                self.tokenizer.encoder[token] = custom_id
-                self.tokenizer.decoder[custom_id] = token
+    #             # 커스텀 ID 설정
+    #             self.tokenizer.encoder[token] = custom_id
+    #             self.tokenizer.decoder[custom_id] = token
                 
-                # 추가 토큰 매핑 수정
-                if hasattr(self.tokenizer, 'added_tokens_encoder'):
-                    self.tokenizer.added_tokens_encoder[token] = custom_id
-                if hasattr(self.tokenizer, 'added_tokens_decoder'):
-                    self.tokenizer.added_tokens_decoder[custom_id] = token
+    #             # 추가 토큰 매핑 수정
+    #             if hasattr(self.tokenizer, 'added_tokens_encoder'):
+    #                 self.tokenizer.added_tokens_encoder[token] = custom_id
+    #             if hasattr(self.tokenizer, 'added_tokens_decoder'):
+    #                 self.tokenizer.added_tokens_decoder[custom_id] = token
                 
-                print(f"토큰 '{token}' - 설정된 커스텀 ID: {custom_id}")
-        else:
-            print("경고: 현재 토크나이저는 직접 ID 매핑을 지원하지 않습니다.")
+    #             print(f"토큰 '{token}' - 설정된 커스텀 ID: {custom_id}")
+    #     else:
+    #         print("경고: 현재 토크나이저는 직접 ID 매핑을 지원하지 않습니다.")
         
-        # 7. 모델 임베딩 크기 조정
-        self.llm.resize_token_embeddings(len(self.tokenizer))
+    #     # 7. 모델 임베딩 크기 조정
+    #     self.llm.resize_token_embeddings(len(self.tokenizer))
         
-        # 8. 결과 확인
-        print(f"추가 후 토큰 수: {len(self.tokenizer)}")
-        print(f"추가 후 특수 토큰 목록: {self.tokenizer.all_special_tokens}")
-        for token in special_tokens["additional_special_tokens"]:
-            curr_id = self.tokenizer.convert_tokens_to_ids(token)
-            print(f"토큰: {token}, ID: {curr_id}")
+    #     # 8. 결과 확인
+    #     print(f"추가 후 토큰 수: {len(self.tokenizer)}")
+    #     print(f"추가 후 특수 토큰 목록: {self.tokenizer.all_special_tokens}")
+    #     for token in special_tokens["additional_special_tokens"]:
+    #         curr_id = self.tokenizer.convert_tokens_to_ids(token)
+    #         print(f"토큰: {token}, ID: {curr_id}")
         
-        # # 9. 내부 처리에서의 특수 인덱스 사용 설명
-        # print("\n참고: 토크나이저에서는 음수 ID를 직접 사용할 수 없습니다.")
-        # print("음수 값(IGNORE_INDEX=-100, IMAGE_TOKEN_INDEX=-200)은 내부 처리 로직에서 특별한 목적으로 사용됩니다.")
+    #     # # 9. 내부 처리에서의 특수 인덱스 사용 설명
+    #     # print("\n참고: 토크나이저에서는 음수 ID를 직접 사용할 수 없습니다.")
+    #     # print("음수 값(IGNORE_INDEX=-100, IMAGE_TOKEN_INDEX=-200)은 내부 처리 로직에서 특별한 목적으로 사용됩니다.")
     # ------------------------------------------------------------------ #
     # UTILS
     # ------------------------------------------------------------------ #
@@ -440,7 +441,7 @@ class CustomVLMModel(PreTrainedModel):
             attention_mask=attention_mask,
             labels=labels
         )
-        
+        inp_emb.requires_grad_()
         # LLM 모델 호출
         return self.llm(
             inputs_embeds=inp_emb,

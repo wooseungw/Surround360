@@ -48,7 +48,7 @@ class VisionLanguageConfig(PretrainedConfig):
         self.vision_config = AutoConfig.from_pretrained(self.vision_model_name)
         self.vision_config = self.vision_config.vision_config if hasattr(self.vision_config, "vision_config") else self.vision_config
         self.language_config = AutoConfig.from_pretrained(self.language_model_name)
-        self.language_config = self.language_config.text_config if hasattr(self.language_config, "text_config") else self.language_config
+        # self.language_config = self.language_config.text_config if hasattr(self.language_config, "text_config") else self.language_config
         
 
         # Projector and compressor settings
