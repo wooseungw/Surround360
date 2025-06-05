@@ -6,4 +6,5 @@ __pycache__/
 checkpoints/
 data/quic360/
 data/raw/
-
+results/
+saved_models/
