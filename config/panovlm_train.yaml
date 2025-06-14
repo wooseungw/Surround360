@@ -1,0 +1,67 @@
+# PanoVLM 학습 설정 파일
+
+# 모델 설정
+vision_model_name_or_path: "facebook/dinov2-small"  # Vision 인코더 모델
+language_model_name_or_path: "google/gemma-3-4b-it"  # 언어 모델
+vision_processor: "openai/clip-vit-base-patch32"  # 이미지 프로세서 (선택적)
+projector_type: "mlp2x_gelu"  # 프로젝터 타입
+
+# 동결 설정
+freeze_vision: true  # Vision 모델 동결 여부
+freeze_vision_except: []  # 동결하지 않을 Vision 레이어 (마지막 레이어만 학습)
+freeze_language: true  # 언어 모델 동결 여부
+freeze_language_except: []  # 동결하지 않을 언어 모델 레이어
+freeze_projector: false  # Projector 모델 동결 여부
+
+# 저장 설정
+model:
+  save_dir: "saved_models/panovlm"
+
+# 데이터 설정
+data:
+  dir: "data/quic360"
+  train_file: "train.csv"
+  valid_file: "valid.csv"
+  image_size: [224, 224]
+  max_length: 512
+  do_crop: true  # 파노라마 이미지 크롭 여부
+  fov: 90.0  # 시야각 (도)
+  overlap_ratio: 0.2  # 크롭 간 중첩 비율
+
+# 학습 설정
+training:
+  output_dir: "outputs/panovlm"
+  run_name: "panovlm_training"
+  num_epochs: 5
+  batch_size:
+    train: 2  # 파노라마 이미지는 메모리를 많이 사용하므로 작게 설정
+    eval: 4
+  gradient_accumulation_steps: 8  # 메모리 효율성을 위해 증가
+  gradient_checkpointing: true  # 메모리 효율성을 위해 사용
+  learning_rate: 1.0e-5
+  warmup_ratio: 0.1
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  logging_dir: "logs/panovlm"
+  logging_steps: 10
+  eval_strategy: "steps"
+  eval_steps: 500
+  save_strategy: "steps"
+  save_steps: 500
+  save_total_limit: 3
+  load_best_model_at_end: true
+  metric_for_best_model: "eval_loss"
+  greater_is_better: false
+  fp16: true  # 메모리 효율성 향상을 위해 FP16 사용
+  dataloader_num_workers: 4
+  report_to: "wandb"
+
+# wandb 설정
+wandb:
+  project: "Surround360"
+  name: "panovlm_training_run"
+
+# DeepSpeed 설정 (선택적)
+deepspeed:
+  enabled: false
+  config: "config/zero3.json"  # ZeRO-3 설정 파일 경로

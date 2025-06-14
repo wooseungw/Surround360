@@ -1856,7 +1856,7 @@ class Blip2TextModelWithProjection(Blip2PreTrainedModel):
 
         >>> model = Blip2TextModelWithProjection.from_pretrained(
         ...     "Salesforce/blip2-itm-vit-g", torch_dtype=torch.float16
-        ... )
+        ... )   
 
         >>> model.to(device)  # doctest: +IGNORE_RESULT
 
