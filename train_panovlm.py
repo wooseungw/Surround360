@@ -10,6 +10,7 @@ from src.models.panovlm import PanoVLM
 from src.models.panovlm_config import PanoVLMConfig
 
 # AutoTokenizer와 AutoProcessor 사용
+import transformers
 from transformers import AutoTokenizer, AutoProcessor, Trainer
 import pandas as pd
 from PIL import Image
