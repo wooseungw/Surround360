@@ -3,7 +3,7 @@
 # 모델 설정
 vision_model_name_or_path: "facebook/dinov2-small"  # Vision 인코더 모델
 language_model_name_or_path: "google/gemma-3-4b-it"  # 언어 모델
-vision_processor: "openai/clip-vit-base-patch32"  # 이미지 프로세서 (선택적)
+
 projector_type: "mlp2x_gelu"  # 프로젝터 타입
 
 # 동결 설정
