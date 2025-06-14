@@ -580,6 +580,43 @@ class PanoVLM(PreTrainedModel):
                 **generate_kwargs
             )
     
+    def gradient_checkpointing_enable(self, **kwargs):
+        """
+        Enable gradient checkpointing for the model.
+        Trainer는 모델에 이 메서드가 있어야 gradient_checkpointing=True 설정을 활용할 수 있습니다.
+        """
+        # Vision 모델에 gradient checkpointing 활성화
+        if hasattr(self.vision_model, "gradient_checkpointing_enable"):
+            self.vision_model.gradient_checkpointing_enable(**kwargs)
+            
+        # Language 모델에 gradient checkpointing 활성화
+        if hasattr(self.language_model, "gradient_checkpointing_enable"):
+            self.language_model.gradient_checkpointing_enable(**kwargs)
+            
+        # 캐시 사용을 비활성화하여 메모리 절약
+        if hasattr(self.language_model.config, "use_cache"):
+            self.language_model.config.use_cache = False
+        
+        self.gradient_checkpointing = True
+
+    def gradient_checkpointing_disable(self):
+        """
+        Disable gradient checkpointing for the model.
+        """
+        # Vision 모델에 gradient checkpointing 비활성화
+        if hasattr(self.vision_model, "gradient_checkpointing_disable"):
+            self.vision_model.gradient_checkpointing_disable()
+            
+        # Language 모델에 gradient checkpointing 비활성화
+        if hasattr(self.language_model, "gradient_checkpointing_disable"):
+            self.language_model.gradient_checkpointing_disable()
+            
+        # 캐시 사용 재활성화
+        if hasattr(self.language_model.config, "use_cache"):
+            self.language_model.config.use_cache = True
+        
+        self.gradient_checkpointing = False
+        
     def set_tokenizer(self, tokenizer):
         """
         모델에 토크나이저를 설정
