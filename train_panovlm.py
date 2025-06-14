@@ -21,6 +21,7 @@ from pathlib import Path
 
 import yaml
 import argparse
+import inspect
 from typing import Dict, List, Optional, Union, Any
 
 from py360convert import e2p
@@ -89,12 +90,55 @@ class PanoVLMDataset(Dataset):
         
         # 이미지 처리
         if self.image_processor:
-            # 이미지 프로세서가 있는 경우
-            pixel_values = self.image_processor(
-                image, 
-                return_tensors="pt", 
-                size=self.image_size
-            ).pixel_values
+            try:
+                # 다양한 이미지 프로세서 타입 처리
+                processor_type = type(self.image_processor).__name__
+                
+                # 1. AutoImageProcessor 또는 일반적인 이미지 프로세서 처리
+                if hasattr(self.image_processor, '__call__') and not hasattr(self.image_processor, 'feature_extractor'):
+                    # 일반적인 이미지 프로세서 (CLIPImageProcessor, DeiTImageProcessor 등)
+                    processor_kwargs = {'return_tensors': 'pt'}
+                    
+                    # size 파라미터 지원 여부 확인 (모든 프로세서가 size를 지원하지는 않음)
+                    if hasattr(self.image_processor, 'size') or 'size' in inspect.signature(self.image_processor.__call__).parameters:
+                        processor_kwargs['size'] = self.image_size
+                        
+                    pixel_values = self.image_processor(image, **processor_kwargs).pixel_values
+                    
+                # 2. 복합 프로세서(CLIPProcessor 등)를 위한 처리
+                elif hasattr(self.image_processor, 'feature_extractor'):
+                    # CLIP 기반 이미지 프로세서의 feature_extractor 활용
+                    processor_kwargs = {'return_tensors': 'pt'}
+                    
+                    # size 파라미터 지원 여부 확인
+                    if hasattr(self.image_processor.feature_extractor, 'size') or 'size' in inspect.signature(self.image_processor.feature_extractor.__call__).parameters:
+                        processor_kwargs['size'] = self.image_size
+                        
+                    pixel_values = self.image_processor.feature_extractor(image, **processor_kwargs).pixel_values
+                
+                # 3. 특수 케이스 처리 (필요시)
+                else:
+                    # 그 외의 경우에 대한 기본 처리
+                    pixel_values = self.image_processor(
+                        image, 
+                        return_tensors="pt",
+                        size=self.image_size
+                    ).pixel_values
+                
+                if idx == 0:  # 첫 번째 샘플에 대한 디버깅
+                    print(f"이미지 프로세서 타입: {processor_type}")
+                    print(f"생성된 pixel_values 형태: {pixel_values.shape}")
+            
+            except Exception as e:
+                print(f"이미지 프로세서 오류 발생: {str(e)}, 기본 전처리 사용")
+                # 오류 발생 시 기본 전처리로 폴백
+                from torchvision import transforms
+                transform = transforms.Compose([
+                    transforms.Resize(self.image_size),
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+                ])
+                pixel_values = transform(image).unsqueeze(0)
         else:
             # 간단한 기본 전처리
             from torchvision import transforms
@@ -263,9 +307,23 @@ def main():
     if "vision_processor" in config and config["vision_processor"]:
         print(f"Loading image processor: {config['vision_processor']}")
         try:
-            image_processor = AutoProcessor.from_pretrained(config["vision_processor"])
-        except:
-            print("Failed to load image processor, using default preprocessing")
+            # 비전 모델에 맞는 프로세서 로드
+            from transformers import AutoImageProcessor
+            image_processor = AutoImageProcessor.from_pretrained(config["vision_processor"])
+            print(f"이미지 프로세서 로드 완료: {type(image_processor).__name__}")
+        except Exception as e:
+            print(f"Failed to load image processor: {str(e)}")
+            print("Using default preprocessing instead")
+    
+    # 비전 프로세서가 로드되지 않은 경우 비전 모델에서 직접 프로세서 로드 시도
+    if image_processor is None and "vision_model_name_or_path" in config:
+        try:
+            from transformers import AutoImageProcessor
+            image_processor = AutoImageProcessor.from_pretrained(config["vision_model_name_or_path"])
+            print(f"비전 모델에서 이미지 프로세서 로드 완료: {type(image_processor).__name__}")
+        except Exception as e:
+            print(f"Failed to load image processor from vision model: {str(e)}")
+            print("Using default preprocessing")
     
     # 모델 파라미터 동결 관리 함수
     def freeze_model_parameters(model_part, model_name, freeze=True, freeze_except_layers=None):
