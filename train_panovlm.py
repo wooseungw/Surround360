@@ -363,7 +363,17 @@ def main():
             freeze_except_layers: 동결하지 않을 레이어 이름 목록 (전체 경로)
         """
         if not freeze:
-            print(f"{model_name} 전체 파라미터가 학습 가능한 상태로 설정되었습니다.")
+            unfrozen_count = 0
+            for name, param in model_part.named_parameters():
+                param.requires_grad = True
+                unfrozen_count += 1
+                
+            print(f"{model_name} 전체 파라미터({unfrozen_count}개)가 학습 가능한 상태로 설정되었습니다.")
+            
+            # 학습 가능한 파라미터 수 계산 및 로깅
+            trainable_params = sum(p.numel() for p in model_part.parameters() if p.requires_grad)
+            total_params = sum(p.numel() for p in model_part.parameters())
+            print(f"{model_name} 학습 가능한 파라미터: {trainable_params:,}/{total_params:,} ({trainable_params/total_params*100:.2f}%)")
             return
 
         # 모든 파라미터 동결
@@ -373,13 +383,19 @@ def main():
         # 특정 레이어는 학습 가능하게 설정
         if freeze_except_layers:
             unfrozen_count = 0
+            unfrozen_params = 0
+            unfrozen_layers = []
+            
             for name, param in model_part.named_parameters():
                 if any(except_layer in name for except_layer in freeze_except_layers):
                     param.requires_grad = True
                     unfrozen_count += 1
+                    unfrozen_params += param.numel()
+                    unfrozen_layers.append(name)
             
             if unfrozen_count > 0:
                 print(f"{model_name} 모델에서 {unfrozen_count}개 파라미터가 학습 가능한 상태로 설정되었습니다.")
+                print(f"학습 가능한 레이어: {', '.join(unfrozen_layers)}")
         
         print(f"{model_name} 모델 파라미터가 동결되었습니다.")
         
@@ -388,25 +404,43 @@ def main():
         total_params = sum(p.numel() for p in model_part.parameters())
         print(f"{model_name} 학습 가능한 파라미터: {trainable_params:,}/{total_params:,} ({trainable_params/total_params*100:.2f}%)")
     
-    # Vision 모델 파라미터 동결 여부 설정
-    vision_freeze = config.get("freeze_vision", False)
+    # Vision 모델 파라미터 동결 여부 설정 (완전 동결)
+    vision_freeze = config.get("freeze_vision", True)
     vision_freeze_except = config.get("freeze_vision_except", [])
     freeze_model_parameters(model.vision_model, "Vision Encoder", vision_freeze, vision_freeze_except)
     
-    # LLM 모델 파라미터 동결 여부 설정
+    # LLM 모델 파라미터 동결 여부 설정 (완전 동결)
     language_freeze = config.get("freeze_language", True)
     language_freeze_except = config.get("freeze_language_except", [])
     freeze_model_parameters(model.language_model, "Language Model", language_freeze, language_freeze_except)
     
-    # Projector 파라미터 동결 여부 설정 (옵션)
+    # Projector 파라미터 동결 여부 설정 (학습 가능하게 유지)
     if model.projector is not None:
         projector_freeze = config.get("freeze_projector", False)
+        
+        print("\n===== Projector 상세 정보 =====")
+        print(f"Projector 구조: {model.projector}")
+        
         if projector_freeze:
             for param in model.projector.parameters():
                 param.requires_grad = False
             print("Projector 파라미터가 동결되었습니다.")
         else:
-            print("Projector 파라미터가 학습 가능합니다.")
+            for param in model.projector.parameters():
+                param.requires_grad = True
+            
+            # Projector 학습 가능한 파라미터 수 계산 및 로깅
+            projector_trainable_params = sum(p.numel() for p in model.projector.parameters() if p.requires_grad)
+            projector_total_params = sum(p.numel() for p in model.projector.parameters())
+            
+            print(f"Projector 모든 파라미터({projector_total_params:,}개)가 학습 가능한 상태로 설정되었습니다.")
+            print(f"Projector 학습 가능한 파라미터: {projector_trainable_params:,}/{projector_total_params:,} ({projector_trainable_params/projector_total_params*100:.2f}%)")
+            
+            # 각 레이어의 파라미터 상태 출력
+            print("\n----- Projector 레이어별 상태 -----")
+            for name, param in model.projector.named_parameters():
+                print(f"{name}: 학습 가능={param.requires_grad}, 크기={param.size()}, 파라미터 수={param.numel():,}")
+        print("============================\n")
     
     # 장치 설정
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -487,13 +521,145 @@ def main():
         trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         return total_params, trainable_params
     
+    # 컴포넌트별 파라미터 상세 분석
+    def analyze_parameters_by_component(model):
+        """모델의 컴포넌트별 파라미터 상세 분석"""
+        components = {
+            "vision_model": model.vision_model if hasattr(model, "vision_model") else None,
+            "language_model": model.language_model if hasattr(model, "language_model") else None,
+            "projector": model.projector if hasattr(model, "projector") else None
+        }
+        
+        results = {}
+        
+        for name, component in components.items():
+            if component is None:
+                continue
+                
+            total = sum(p.numel() for p in component.parameters())
+            trainable = sum(p.numel() for p in component.parameters() if p.requires_grad)
+            frozen = total - trainable
+            
+            results[name] = {
+                "total": total,
+                "trainable": trainable,
+                "frozen": frozen,
+                "trainable_percent": (trainable / total * 100) if total > 0 else 0
+            }
+            
+        return results
+    
+    # 트레이너 실행 전 파라미터 검증 함수
+    def validate_training_parameters(model):
+        """학습 전 모델 파라미터 상태 검증"""
+        is_valid = True
+        messages = []
+        
+        # 비전 모델과 언어 모델 파라미터 검사
+        if hasattr(model, "vision_model"):
+            vision_trainable = any(p.requires_grad for p in model.vision_model.parameters())
+            if vision_trainable:
+                is_valid = False
+                messages.append("경고: 비전 모델의 일부 파라미터가 학습 가능한 상태입니다. 비전 모델은 동결해야 합니다.")
+        
+        if hasattr(model, "language_model"):
+            language_trainable = any(p.requires_grad for p in model.language_model.parameters())
+            if language_trainable:
+                is_valid = False
+                messages.append("경고: 언어 모델의 일부 파라미터가 학습 가능한 상태입니다. 언어 모델은 동결해야 합니다.")
+        
+        # 프로젝터 파라미터 검사
+        if hasattr(model, "projector"):
+            projector_trainable = any(p.requires_grad for p in model.projector.parameters())
+            if not projector_trainable:
+                is_valid = False
+                messages.append("경고: 프로젝터의 모든 파라미터가 동결 상태입니다. 프로젝터는 학습 가능해야 합니다.")
+                
+        return is_valid, messages
+    
+    # 전체 파라미터 요약
     total, trainable = count_parameters(model)
     print(f"\n===== 모델 파라미터 요약 =====")
     print(f"총 파라미터 수: {total:,}")
     print(f"학습 가능한 파라미터 수: {trainable:,}")
     print(f"동결된 파라미터 수: {total - trainable:,}")
     print(f"학습 가능 비율: {trainable / total * 100:.2f}%")
+    
+    # 컴포넌트별 분석
+    component_analysis = analyze_parameters_by_component(model)
+    print("\n----- 컴포넌트별 파라미터 분석 -----")
+    for component_name, stats in component_analysis.items():
+        print(f"{component_name}:")
+        print(f"  총 파라미터: {stats['total']:,}")
+        print(f"  학습 가능한 파라미터: {stats['trainable']:,} ({stats['trainable_percent']:.2f}%)")
+        print(f"  동결된 파라미터: {stats['frozen']:,}")
+    
+    # 학습 설정 검증
+    is_valid, messages = validate_training_parameters(model)
+    print("\n----- 학습 설정 검증 -----")
+    if is_valid:
+        print("✅ 모든 파라미터가 올바르게 설정되었습니다. 비전 및 언어 모델은 동결되고 프로젝터만 학습 가능합니다.")
+    else:
+        print("⚠️ 파라미터 설정에 문제가 있습니다:")
+        for msg in messages:
+            print(f" - {msg}")
+            
     print(f"=============================\n")
+    
+    # 학습 중 파라미터 모니터링을 위한 콜백 클래스
+    class ParameterMonitoringCallback(transformers.TrainerCallback):
+        """학습 중 파라미터 상태를 모니터링하는 콜백"""
+        
+        def __init__(self, model):
+            self.model = model
+            
+        def on_train_begin(self, args, state, control, **kwargs):
+            """학습 시작 시 파라미터 상태 확인"""
+            print("\n===== 학습 시작 시 파라미터 상태 확인 =====")
+            self._log_parameter_status()
+            
+        def on_step_end(self, args, state, control, **kwargs):
+            """일정 스텝마다 파라미터 변화 확인 (로깅 스텝의 10배 간격으로)"""
+            if state.global_step > 0 and state.global_step % (args.logging_steps * 10) == 0:
+                print(f"\n===== Step {state.global_step}: 파라미터 상태 확인 =====")
+                self._log_parameter_status()
+                
+        def _log_parameter_status(self):
+            """모델의 현재 파라미터 상태 로깅"""
+            # 비전 모델 파라미터 상태
+            vision_requires_grad = any(p.requires_grad for p in self.model.vision_model.parameters())
+            vision_grad_exists = any(p.grad is not None for p in self.model.vision_model.parameters() if p.requires_grad)
+            
+            # 언어 모델 파라미터 상태
+            language_requires_grad = any(p.requires_grad for p in self.model.language_model.parameters())
+            language_grad_exists = any(p.grad is not None for p in self.model.language_model.parameters() if p.requires_grad)
+            
+            # 프로젝터 파라미터 상태
+            projector_requires_grad = any(p.requires_grad for p in self.model.projector.parameters())
+            projector_grad_exists = any(p.grad is not None for p in self.model.projector.parameters() if p.requires_grad)
+            
+            print(f"Vision Model - requires_grad: {vision_requires_grad}, grad exists: {vision_grad_exists}")
+            print(f"Language Model - requires_grad: {language_requires_grad}, grad exists: {language_grad_exists}")
+            print(f"Projector - requires_grad: {projector_requires_grad}, grad exists: {projector_grad_exists}")
+            
+            # 프로젝터 파라미터 상세 로깅 (학습 중인지 확인)
+            if projector_requires_grad:
+                has_changing_params = False
+                print("\n----- Projector 파라미터 상태 -----")
+                for name, param in self.model.projector.named_parameters():
+                    if param.requires_grad:
+                        grad_status = "그래디언트 있음" if param.grad is not None else "그래디언트 없음"
+                        print(f"{name}: {grad_status}")
+                        if param.grad is not None:
+                            grad_norm = torch.norm(param.grad).item()
+                            if grad_norm > 1e-6:  # 그래디언트 크기가 의미있는지 확인
+                                has_changing_params = True
+                            print(f"  - 그래디언트 L2 norm: {grad_norm:.6f}")
+                
+                if has_changing_params:
+                    print("✅ 프로젝터 파라미터가 정상적으로 학습 중입니다.")
+                else:
+                    print("⚠️ 프로젝터 파라미터가 requires_grad=True이지만 그래디언트가 없거나 매우 작습니다.")
     
     # 트레이너 초기화
     trainer = Trainer(
@@ -503,6 +669,7 @@ def main():
         eval_dataset=eval_dataset,
         data_collator=data_collator,
         # compute_metrics=compute_metrics_wrapper,  # 필요시 추가
+        callbacks=[ParameterMonitoringCallback(model)]
     )
   
     # 학습 실행

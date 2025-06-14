@@ -9,11 +9,11 @@ projector_dim_in: 384         # dinov2-small의 출력 차원 (384)
 projector_dim_out: 2560       # gemma-3-4b의 입력 차원 (2560)
 
 # 동결 설정
-freeze_vision: true  # Vision 모델 동결 여부
-freeze_vision_except: []  # 동결하지 않을 Vision 레이어 (마지막 레이어만 학습)
-freeze_language: true  # 언어 모델 동결 여부
-freeze_language_except: []  # 동결하지 않을 언어 모델 레이어
-freeze_projector: false  # Projector 모델 동결 여부
+freeze_vision: true  # Vision 모델 동결 여부 (true=동결, false=학습)
+freeze_vision_except: []  # 동결하지 않을 Vision 레이어 (비워두면 전체 동결)
+freeze_language: true  # 언어 모델 동결 여부 (true=동결, false=학습)
+freeze_language_except: []  # 동결하지 않을 언어 모델 레이어 (비워두면 전체 동결)
+freeze_projector: false  # Projector 모델 동결 여부 (false=학습, true=동결)
 
 # 저장 설정
 model:

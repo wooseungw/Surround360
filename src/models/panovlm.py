@@ -147,10 +147,21 @@ class PanoVLM(PreTrainedModel):
         
         # 2) Language model 로드 - 다양한 언어 모델 지원
         lang_cls = get_model_class(config.language_model_name_or_path)
+        
+        # Gemma3 모델을 위한 eager 어텐션 구현 적용
+        load_kwargs = {
+            "config": config.language_config,
+            "cache_dir": cache_dir
+        }
+        
+        # Gemma3 모델인 경우 eager 어텐션 구현으로 설정
+        if "gemma-3" in config.language_model_name_or_path.lower():
+            print("Gemma3 모델에 eager 어텐션 구현 적용")
+            load_kwargs["attn_implementation"] = "eager"
+        
         full_vlm = lang_cls.from_pretrained(
             config.language_model_name_or_path,
-            config=config.language_config,
-            cache_dir=cache_dir
+            **load_kwargs
         )
         self.language_model = extract_text_model(full_vlm, config.language_model_name_or_path)
 
@@ -513,6 +524,10 @@ class PanoVLM(PreTrainedModel):
                 interpolate_pos_encoding=interpolate_pos_encoding
             )
             
+            # 명시적으로 requires_grad=True 설정하여 그래디언트 계산 보장
+            if self.training and not inputs_embeds.requires_grad:
+                inputs_embeds.requires_grad_(True)
+            
             # LLM 모델에 전달할 인자 구성
             model_kwargs = {
                 "attention_mask": combined_mask if attention_mask is not None else None,
@@ -584,38 +599,145 @@ class PanoVLM(PreTrainedModel):
         """
         Enable gradient checkpointing for the model.
         Trainer는 모델에 이 메서드가 있어야 gradient_checkpointing=True 설정을 활용할 수 있습니다.
+        
+        gradient_checkpointing의 활성화 상태를 개선하여 메모리 효율성을 높입니다.
+        프로젝터 레이어도 checkpointing이 가능한 경우 활성화합니다.
         """
-        # Vision 모델에 gradient checkpointing 활성화
-        if hasattr(self.vision_model, "gradient_checkpointing_enable"):
-            self.vision_model.gradient_checkpointing_enable(**kwargs)
+        print("\n===== Gradient Checkpointing 활성화 =====")
+        
+        # 1. Vision 모델에 gradient checkpointing 활성화
+        try:
+            if hasattr(self.vision_model, "gradient_checkpointing_enable"):
+                self.vision_model.gradient_checkpointing_enable()
+                print("✅ Vision 모델: gradient_checkpointing_enable 메서드 사용 성공")
+            elif hasattr(self.vision_model, "config") and hasattr(self.vision_model.config, "gradient_checkpointing"):
+                self.vision_model.config.gradient_checkpointing = True
+                print("✅ Vision 모델: config.gradient_checkpointing 설정 성공")
+            else:
+                # 대체 방법: 직접 속성 설정
+                self.vision_model.gradient_checkpointing = True
+                print("✅ Vision 모델: 직접 속성 설정 성공")
+                
+            # Vision 모델 파라미터 동결 확인
+            if not any(p.requires_grad for p in self.vision_model.parameters()):
+                print("📝 참고: Vision 모델은 동결 상태라 그래디언트 계산이 필요하지 않습니다.")
+        except Exception as e:
+            print(f"⚠️ Vision 모델 gradient checkpointing 활성화 실패: {str(e)}")
             
-        # Language 모델에 gradient checkpointing 활성화
-        if hasattr(self.language_model, "gradient_checkpointing_enable"):
-            self.language_model.gradient_checkpointing_enable(**kwargs)
+        # 2. Language 모델에 gradient checkpointing 활성화 
+        try:
+            if hasattr(self.language_model, "gradient_checkpointing_enable"):
+                self.language_model.gradient_checkpointing_enable()
+                print("✅ Language 모델: gradient_checkpointing_enable 메서드 사용 성공")
+            elif hasattr(self.language_model, "config") and hasattr(self.language_model.config, "gradient_checkpointing"):
+                self.language_model.config.gradient_checkpointing = True
+                print("✅ Language 모델: config.gradient_checkpointing 설정 성공")
+            else:
+                # 대체 방법: 직접 속성 설정
+                self.language_model.gradient_checkpointing = True
+                print("✅ Language 모델: 직접 속성 설정 성공")
+                
+            # Language 모델 파라미터 동결 확인
+            if not any(p.requires_grad for p in self.language_model.parameters()):
+                print("📝 참고: Language 모델은 동결 상태라 그래디언트 계산이 필요하지 않습니다.")
+        except Exception as e:
+            print(f"⚠️ Language 모델 gradient checkpointing 활성화 실패: {str(e)}")
+        
+        # 3. Projector 모듈에 gradient checkpointing 적용 (가능한 경우)
+        if self.projector is not None:
+            try:
+                # Linear 레이어와 같은 단일 연산이 아닌 경우에만 적용
+                if isinstance(self.projector, nn.Sequential) and len(list(self.projector.children())) > 1:
+                    # checkpoint 함수를 직접 적용할 수 있는 형태로 랩핑
+                    original_forward = self.projector.forward
+                    
+                    def checkpointed_forward(*args, **kwargs):
+                        if torch.is_grad_enabled() and any(p.requires_grad for p in self.projector.parameters()):
+                            from torch.utils.checkpoint import checkpoint
+                            return checkpoint(original_forward, *args, **kwargs)
+                        else:
+                            return original_forward(*args, **kwargs)
+                    
+                    # 프로젝터의 forward 메서드 교체
+                    self.projector.forward = checkpointed_forward
+                    print("✅ Projector: 커스텀 gradient checkpointing 적용 성공")
+                    
+                    # Projector 모델 학습 상태 확인
+                    if any(p.requires_grad for p in self.projector.parameters()):
+                        print("📝 Projector는 학습 상태이므로 gradient checkpointing이 적용됩니다.")
+                else:
+                    print("📝 Projector는 단순 구조라 gradient checkpointing이 불필요합니다.")
+            except Exception as e:
+                print(f"⚠️ Projector gradient checkpointing 설정 실패: {str(e)}")
             
-        # 캐시 사용을 비활성화하여 메모리 절약
-        if hasattr(self.language_model.config, "use_cache"):
+        # 4. 캐시 사용을 비활성화하여 메모리 절약
+        if hasattr(self.language_model, "config") and hasattr(self.language_model.config, "use_cache"):
             self.language_model.config.use_cache = False
+            print("✅ Language 모델 use_cache 비활성화됨")
+        
+        # 5. 기타 사용자 제공 kwargs 처리
+        for key, value in kwargs.items():
+            print(f"📝 추가 설정: {key}={value}")
         
         self.gradient_checkpointing = True
+        print("✅ 모델 전체 gradient_checkpointing 활성화 완료")
+        print("========================================\n")
 
     def gradient_checkpointing_disable(self):
         """
         Disable gradient checkpointing for the model.
+        
+        모든 컴포넌트의 gradient checkpointing을 비활성화합니다.
         """
-        # Vision 모델에 gradient checkpointing 비활성화
-        if hasattr(self.vision_model, "gradient_checkpointing_disable"):
-            self.vision_model.gradient_checkpointing_disable()
-            
-        # Language 모델에 gradient checkpointing 비활성화
-        if hasattr(self.language_model, "gradient_checkpointing_disable"):
-            self.language_model.gradient_checkpointing_disable()
-            
-        # 캐시 사용 재활성화
-        if hasattr(self.language_model.config, "use_cache"):
+        print("\n===== Gradient Checkpointing 비활성화 =====")
+        
+        # 1. Vision 모델 gradient checkpointing 비활성화
+        try:
+            if hasattr(self.vision_model, "gradient_checkpointing_disable"):
+                self.vision_model.gradient_checkpointing_disable()
+                print("✅ Vision 모델: gradient_checkpointing_disable 메서드 호출 성공")
+            elif hasattr(self.vision_model, "config") and hasattr(self.vision_model.config, "gradient_checkpointing"):
+                self.vision_model.config.gradient_checkpointing = False
+                print("✅ Vision 모델: config.gradient_checkpointing 비활성화")
+            elif hasattr(self.vision_model, "gradient_checkpointing"):
+                self.vision_model.gradient_checkpointing = False
+                print("✅ Vision 모델: 직접 속성 비활성화")
+        except Exception as e:
+            print(f"⚠️ Vision 모델 gradient checkpointing 비활성화 실패: {str(e)}")
+        
+        # 2. Language 모델 gradient checkpointing 비활성화
+        try:
+            if hasattr(self.language_model, "gradient_checkpointing_disable"):
+                self.language_model.gradient_checkpointing_disable()
+                print("✅ Language 모델: gradient_checkpointing_disable 메서드 호출 성공")
+            elif hasattr(self.language_model, "config") and hasattr(self.language_model.config, "gradient_checkpointing"):
+                self.language_model.config.gradient_checkpointing = False
+                print("✅ Language 모델: config.gradient_checkpointing 비활성화")
+            elif hasattr(self.language_model, "gradient_checkpointing"):
+                self.language_model.gradient_checkpointing = False
+                print("✅ Language 모델: 직접 속성 비활성화")
+        except Exception as e:
+            print(f"⚠️ Language 모델 gradient checkpointing 비활성화 실패: {str(e)}")
+        
+        # 3. Projector 모듈에 적용된 gradient checkpointing 원복 (필요한 경우)
+        if self.projector is not None and isinstance(self.projector, nn.Sequential):
+            try:
+                # 원래 forward 메서드가 랩핑되었다면 원래 메서드로 복구
+                if hasattr(self.projector, "_original_forward"):
+                    self.projector.forward = self.projector._original_forward
+                    delattr(self.projector, "_original_forward")
+                    print("✅ Projector: 원래 forward 메서드로 복구됨")
+            except Exception as e:
+                print(f"⚠️ Projector gradient checkpointing 비활성화 실패: {str(e)}")
+        
+        # 4. 캐시 사용 재활성화
+        if hasattr(self.language_model, "config") and hasattr(self.language_model.config, "use_cache"):
             self.language_model.config.use_cache = True
+            print("✅ Language 모델 use_cache 재활성화됨")
         
         self.gradient_checkpointing = False
+        print("✅ 모델 전체 gradient_checkpointing 비활성화 완료")
+        print("==========================================\n")
         
     def set_tokenizer(self, tokenizer):
         """
