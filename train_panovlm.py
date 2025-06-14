@@ -280,11 +280,37 @@ def main():
         print(f"Using projector type: {config['projector_type']}")
         from src.models.panovlm_config import ProjectorConfig
         
+        # 비전 모델의 차원 자동 감지
+        from transformers import AutoConfig
+        vision_config = AutoConfig.from_pretrained(config["vision_model_name_or_path"])
+        
+        # 비전 모델 차원 가져오기
+        vision_dim = 384  # DinoV2-small 기본값
+        if hasattr(vision_config, 'hidden_size'):
+            vision_dim = vision_config.hidden_size
+        elif hasattr(vision_config, 'embed_dim'):
+            vision_dim = vision_config.embed_dim  # CLIP 모델
+        
+        # 언어 모델 차원 가져오기
+        language_config = AutoConfig.from_pretrained(config["language_model_name_or_path"])
+        lang_dim = 2560  # Gemma-3-4B 기본값
+        if hasattr(language_config, 'hidden_size'):
+            lang_dim = language_config.hidden_size
+        elif hasattr(language_config, 'model_dim'):
+            lang_dim = language_config.model_dim  # Gemma-3 모델
+        elif hasattr(language_config, 'hidden_dim'):
+            lang_dim = language_config.hidden_dim
+        elif hasattr(language_config, 'd_model'):
+            lang_dim = language_config.d_model  # 일부 transformer 모델
+        
+        print(f"Vision model dimension: {vision_dim}")
+        print(f"Language model dimension: {lang_dim}")
+        
         # 프로젝터 구성 생성
         pano_config.projector_config = ProjectorConfig(
             type=config["projector_type"],
-            in_features=config.get("projector_dim_in", 768),
-            out_features=config.get("projector_dim_out", 768)
+            in_features=config.get("projector_dim_in", vision_dim),  # 비전 모델 차원 사용
+            out_features=config.get("projector_dim_out", lang_dim)   # 언어 모델 차원 사용
         )
     
     # PanoVLM 모델 초기화

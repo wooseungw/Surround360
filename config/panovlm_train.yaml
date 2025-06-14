@@ -5,6 +5,8 @@ vision_model_name_or_path: "facebook/dinov2-small"  # Vision 인코더 모델
 language_model_name_or_path: "google/gemma-3-4b-it"  # 언어 모델
 
 projector_type: "mlp2x_gelu"  # 프로젝터 타입
+projector_dim_in: 384         # dinov2-small의 출력 차원 (384)
+projector_dim_out: 2560       # gemma-3-4b의 입력 차원 (2560)
 
 # 동결 설정
 freeze_vision: true  # Vision 모델 동결 여부
