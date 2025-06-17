@@ -500,6 +500,9 @@ def main():
         warmup_ratio=train_config.get('warmup_ratio', 0.1),
         weight_decay=train_config.get('weight_decay', 0.01),
         max_grad_norm=train_config.get('max_grad_norm', 1.0),
+        # FP16 설정
+        fp16=train_config.get('fp16', False),  # false로 설정하여 문제 해결
+        bf16=train_config.get('bf16', False),  # false로 설정하여 문제 해결
         dataloader_num_workers=train_config.get('dataloader_num_workers', 0),
         logging_dir=train_config.get('logging_dir', 'logs/panovlm'),
         logging_steps=train_config.get('logging_steps', 100),
@@ -746,58 +749,32 @@ def main():
             print(f"학습할 총 파라미터 수: {len(projector_params)}")
             print(f"학습할 총 파라미터 개수: {sum(p.numel() for p in projector_params):,}")
             
-            if len(param_names) > 0:
-                print(f"학습할 파라미터 이름: {', '.join(param_names)}")
-            
             if len(projector_params) == 0:
                 raise ValueError("학습할 프로젝터 파라미터가 없습니다. 프로젝터가 동결되었거나 존재하지 않습니다.")
             
             # 옵티마이저 초기화
-            super().__init__(projector_params, lr=lr, weight_decay=weight_decay, **kwargs)
+            super().__init__([{'params': projector_params}], lr=lr, weight_decay=weight_decay, **kwargs)
             
             # Vision 및 Language 모델 동결 상태 확인 (중요!)
             vision_trainable = hasattr(model, "vision_model") and any(p.requires_grad for p in model.vision_model.parameters())
             lang_trainable = hasattr(model, "language_model") and any(p.requires_grad for p in model.language_model.parameters())
             
             if vision_trainable:
-                print("\n⚠️ 경고: Vision 모델에 학습 가능한 파라미터가 있습니다!")
+                print("⚠️ 경고: Vision 모델에 학습 가능한 파라미터가 있습니다!")
                 print("Vision 모델은 완전히 동결되어야 합니다.")
                 
             if lang_trainable:
-                print("\n⚠️ 경고: Language 모델에 학습 가능한 파라미터가 있습니다!")
+                print("⚠️ 경고: Language 모델에 학습 가능한 파라미터가 있습니다!")
                 print("Language 모델은 완전히 동결되어야 합니다.")
             
             if not (vision_trainable or lang_trainable):
-                print("\n✅ Vision 및 Language 모델은 올바르게 동결되었습니다.")
+                print("✅ Vision 및 Language 모델은 올바르게 동결되었습니다.")
             
-            # 그래디언트 추적 카운터 초기화
-            self._step_count = 0
-            self._log_interval = 10  # 10스텝마다 로그 출력
+            # 스케일링 상태를 위한 키 초기화 (FP16 훈련 호환성)
+            self._step_supports_amp_scaling = True
+            self._is_first_step = True
                 
         def step(self, closure=None):
-            self._step_count += 1
-            
-            # 그래디언트 유무 확인 및 정보 출력
-            if self._step_count == 1 or self._step_count % self._log_interval == 0:
-                # 그래디언트 존재 여부 확인
-                grad_exists = any(p.grad is not None for group in self.param_groups for p in group['params'])
-                grad_nonzero = any(p.grad is not None and torch.abs(p.grad).max().item() > 1e-5 
-                                  for group in self.param_groups for p in group['params'])
-                
-                if not grad_exists:
-                    print(f"\n⚠️ 경고 (스텝 {self._step_count}): 그래디언트가 없습니다! 학습이 제대로 진행되지 않을 수 있습니다.")
-                elif not grad_nonzero:
-                    print(f"\n⚠️ 경고 (스텝 {self._step_count}): 그래디언트가 매우 작습니다! 학습이 느리게 진행될 수 있습니다.")
-                else:
-                    print(f"\n✅ (스텝 {self._step_count}): 그래디언트가 정상적으로 계산되었습니다.")
-                    
-                    # 그래디언트 노름 로깅 (디버깅용)
-                    for group_idx, group in enumerate(self.param_groups):
-                        for param_idx, p in enumerate(group['params']):
-                            if p.grad is not None:
-                                grad_norm = torch.norm(p.grad).item()
-                                print(f"  파라미터 그룹 {group_idx}, 파라미터 {param_idx}: 그래디언트 노름 = {grad_norm:.6f}")
-                
             # 기본 스텝 수행
             return super().step(closure)
     

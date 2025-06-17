@@ -39,7 +39,7 @@ training:
     train: 2  # 파노라마 이미지는 메모리를 많이 사용하므로 작게 설정
     eval: 4
   gradient_accumulation_steps: 8  # 메모리 효율성을 위해 증가
-  gradient_checkpointing: true  # 메모리 효율성을 위해 사용
+  gradient_checkpointing: false  # 메모리 효율성을 위해 사용
   learning_rate: 1.0e-5
   warmup_ratio: 0.1
   weight_decay: 0.01
@@ -54,7 +54,7 @@ training:
   load_best_model_at_end: true
   metric_for_best_model: "eval_loss"
   greater_is_better: false
-  fp16: true  # 메모리 효율성 향상을 위해 FP16 사용
+  fp16: false  # 메모리 효율성 향상을 위해 FP16 사용
   dataloader_num_workers: 4
   report_to: "wandb"
 

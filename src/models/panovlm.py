@@ -7,7 +7,6 @@ from transformers import PreTrainedModel
 from contextlib import nullcontext
 import math
 import logging
-import inspect
 
 # 특수 토큰 인덱스 설정
 IMAGE_TOKEN_INDEX = -200  # 이미지 토큰 전용 인덱스
@@ -424,48 +423,23 @@ class PanoVLM(PreTrainedModel):
         # 입력 텐서 형태 확인 및 조정
         pixel_values_reshaped, batch_size, P, is_panorama = self.process_input(pixel_values)
         
-        # 프로젝터가 학습 가능한지 확인 (디버깅용)
-        projector_trainable = self.projector is not None and any(p.requires_grad for p in self.projector.parameters())
-        
         # Vision encoder 처리
         vision_kwargs = {"return_dict": True}
         if "clip" in str(self.vision_model.__class__).lower() and interpolate_pos_encoding:
             vision_kwargs["interpolate_pos_encoding"] = interpolate_pos_encoding
-            
-        # 비전 모델 계산 시 그래디언트 계산 보장 - PyTorch autograd 컨텍스트 사용
-        # 모델이 동결되어 있어도 출력을 위한 그래디언트는 계산해야 함
-        with torch.set_grad_enabled(True):  # 그래디언트 계산 강제 활성화
-            # 디버그 출력 (학습 중에만)
-            if self.training and projector_trainable:
-                print("🔍 Vision 모델 실행 중 (with torch.set_grad_enabled(True))")
-                
-            vision_outputs = self.vision_model(
-                pixel_values=pixel_values_reshaped,
-                **vision_kwargs
-            )
-            
-            # Vision 출력에서 특성 추출
-            if hasattr(vision_outputs, 'last_hidden_state'):
-                vision_embeds = vision_outputs.last_hidden_state  # transformer 기반 출력
-            elif isinstance(vision_outputs, tuple) and len(vision_outputs) > 0:
-                vision_embeds = vision_outputs[0]  # 튜플 형태 출력 처리
-            else:
-                vision_embeds = vision_outputs  # 기타 출력
-                
-            # 명시적으로 새 텐서 생성하고 그래디언트 요구 설정 (항상)
-            # 동결된 vision_model에서 나온 출력이라도 projector에게는 그래디언트가 필요함
-            if self.training:
-                # 디버그 출력 (학습 중에만)
-                if projector_trainable:
-                    print(f"🔍 Vision embeddings: requires_grad={vision_embeds.requires_grad}, shape={vision_embeds.shape}")
-                    
-                # 항상 새 텐서를 생성하고 그래디언트 계산이 가능하도록 설정
-                vision_embeds = vision_embeds.detach().clone()
-                vision_embeds.requires_grad_(True)
-                
-                # 디버그 출력 (학습 중에만)
-                if projector_trainable:
-                    print(f"🔍 Vision embeddings (새로운 텐서): requires_grad={vision_embeds.requires_grad}")
+        
+        vision_outputs = self.vision_model(
+            pixel_values=pixel_values_reshaped,
+            **vision_kwargs
+        )
+        
+        # Vision 출력에서 특성 추출
+        if hasattr(vision_outputs, 'last_hidden_state'):
+            vision_embeds = vision_outputs.last_hidden_state  # transformer 기반 출력
+        elif isinstance(vision_outputs, tuple) and len(vision_outputs) > 0:
+            vision_embeds = vision_outputs[0]  # 튜플 형태 출력 처리
+        else:
+            vision_embeds = vision_outputs  # 기타 출력
         
         # 파노라마 이미지인 경우 reshape
         if is_panorama:
@@ -474,43 +448,32 @@ class PanoVLM(PreTrainedModel):
         
         # 3. Projector 적용
         if self.projector is not None:
-            # 프로젝터가 학습 중인 경우의 처리
-            if self.training and projector_trainable:
-                # 이중 체크: 반드시 그래디언트 흐름이 있어야 함
+            # 학습 중이고 프로젝터가 학습 가능한 경우, vision_embeds에 requires_grad=True 설정
+            if self.training and any(p.requires_grad for p in self.projector.parameters()):
+                # 먼저 텐서 분리하여 새 텐서 생성 (그래디언트 흐름 보장)
                 if not vision_embeds.requires_grad:
-                    print("⚠️ Vision embeddings에 requires_grad 강제 설정")
+                    # 분리된 복사본 만들고 그래디언트 요구로 설정
                     vision_embeds = vision_embeds.detach().clone().requires_grad_(True)
             
             if is_panorama:
                 B, P, S, D = vision_embeds.shape
                 vision_embeds_reshaped = vision_embeds.view(-1, D)  # 마지막 차원만 투영
                 
-                # 디버깅 및 검증
-                if self.training and projector_trainable:
-                    if not vision_embeds_reshaped.requires_grad:
-                        print("⚠️ 파노라마 reshape 후 requires_grad 손실! 강제 설정합니다.")
-                        vision_embeds_reshaped = vision_embeds_reshaped.detach().clone().requires_grad_(True)
-                    else:
-                        print("✅ 파노라마 reshape 후에도 requires_grad 유지됨")
-                
                 # 프로젝터 통과
-                vision_embeds_projected = self.projector(vision_embeds_reshaped)
+                if self.training and any(p.requires_grad for p in self.projector.parameters()):
+                    # 그래디언트 유지 확인
+                    assert vision_embeds_reshaped.requires_grad, "프로젝터 입력에 requires_grad=True가 필요합니다"
                 
-                # 학습 검증 (디버그용)
-                if self.training and projector_trainable:
-                    print(f"🔍 Projector 출력: requires_grad={vision_embeds_projected.requires_grad}")
-                    
+                # 프로젝터 적용
+                vision_embeds_projected = self.projector(vision_embeds_reshaped)
                 vision_embeds = vision_embeds_projected.view(B, P, S, -1)  # 원래 형태로 복원
             else:
-                # 디버깅 및 검증
-                if self.training and projector_trainable:
-                    print(f"🔍 프로젝터 입력: requires_grad={vision_embeds.requires_grad}")
+                # 프로젝터 통과 전 그래디언트 유지 확인
+                if self.training and any(p.requires_grad for p in self.projector.parameters()):
+                    # 그래디언트 유지 확인
+                    assert vision_embeds.requires_grad, "프로젝터 입력에 requires_grad=True가 필요합니다"
                 
                 vision_embeds = self.projector(vision_embeds)
-                
-                # 학습 검증 (디버그용)
-                if self.training and projector_trainable:
-                    print(f"🔍 프로젝터 출력: requires_grad={vision_embeds.requires_grad}")
         
         # 4. 텍스트와 이미지 임베딩 결합
         return self._replace_image_tokens_with_features(
@@ -567,35 +530,30 @@ class PanoVLM(PreTrainedModel):
         Returns:
             torch.FloatTensor: 언어 모델의 출력 로짓
         """
-        # 훈련 중인지와 프로젝터가 학습 가능한지 확인
-        projector_trainable = self.projector is not None and any(p.requires_grad for p in self.projector.parameters())
-        if self.training and projector_trainable:
-            # 디버깅 정보 출력
-            print(f"\n======== 훈련 모드: {self.training}, 프로젝터 학습 가능: {projector_trainable} ========")
-            print(f"📊 그래디언트 체크포인팅: {self.gradient_checkpointing}")
-        
         # FP16 자동 변환 (메모리 효율성)
         autocast_ctx = torch.cuda.amp.autocast() if self.use_fp16 and torch.cuda.is_available() else nullcontext()
         
         with autocast_ctx:
-            # 모든 연산에 그래디언트 보존을 위한 컨텍스트
-            with torch.set_grad_enabled(True):  
-                # 비전 임베딩과 텍스트 임베딩 결합
-                inputs_embeds, combined_labels, combined_mask, position_ids = self._combine_embeddings(
-                    pixel_values=pixel_values,
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    labels=labels,
-                    interpolate_pos_encoding=interpolate_pos_encoding
-                )
-                
-                # 명시적으로 inputs_embeds에 requires_grad=True 설정 
-                # 프로젝터 학습을 위해 필수적으로 필요함
-                if self.training and projector_trainable:
-                    # 이전 텐서에서 분리하고 그래디언트 흐름 보장
-                    inputs_embeds = inputs_embeds.detach().clone()
-                    inputs_embeds.requires_grad_(True)
-                    print(f"🔍 Language 모델 입력: requires_grad={inputs_embeds.requires_grad}, shape={inputs_embeds.shape}")
+            # 비전 임베딩과 텍스트 임베딩 결합
+            inputs_embeds, combined_labels, combined_mask, position_ids = self._combine_embeddings(
+                pixel_values=pixel_values,
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                labels=labels,
+                interpolate_pos_encoding=interpolate_pos_encoding
+            )
+            
+            # 명시적으로 requires_grad=True 설정하여 그래디언트 계산 보장
+            if self.training and any(p.requires_grad for p in self.parameters()):
+                # 입력 임베딩에 그래디언트 흐름 보장
+                if not inputs_embeds.requires_grad:
+                    inputs_embeds = inputs_embeds.detach().clone().requires_grad_(True)
+                    
+                if self.projector is not None and any(p.requires_grad for p in self.projector.parameters()):
+                    # 프로젝터가 학습 중일 때 추가 확인
+                    if not inputs_embeds.requires_grad:
+                        print("경고: 입력 임베딩에 requires_grad=True 설정 필요")
+                        inputs_embeds.requires_grad_(True)
             
             # LLM 모델에 전달할 인자 구성
             model_kwargs = {
@@ -607,31 +565,12 @@ class PanoVLM(PreTrainedModel):
             # 학습 모드에서는 레이블 전달
             if labels is not None:
                 model_kwargs["labels"] = combined_labels
-            
-            # 디버깅: 프로젝터에 그래디언트가 흐르는지 검증
-            if self.training and projector_trainable:
-                # 주요 프로젝터 파라미터 이름 및 현재 상태 출력
-                for name, param in self.projector.named_parameters():
-                    if param.requires_grad:
-                        print(f"✓ 프로젝터 파라미터 '{name}': requires_grad=True, shape={param.shape}")
-            
+                
             # 언어 모델 호출
-            outputs = self.language_model(
+            return self.language_model(
                 inputs_embeds=inputs_embeds,
                 **model_kwargs
             )
-            
-            # 훈련 중에 각 단계마다 디버깅 정보 (첫 10번만)
-            if self.training and projector_trainable and not hasattr(self, '_debug_counter'):
-                self._debug_counter = 0
-            
-            if self.training and projector_trainable and self._debug_counter < 10:
-                self._debug_counter += 1
-                # 손실 값 출력
-                if hasattr(outputs, 'loss') and outputs.loss is not None:
-                    print(f"📝 Loss: {outputs.loss.item():.4f}, requires_grad={outputs.loss.requires_grad}")
-            
-            return outputs
     
 
     @torch.no_grad()
@@ -693,63 +632,45 @@ class PanoVLM(PreTrainedModel):
         """
         print("\n===== Gradient Checkpointing 활성화 =====")
         
-        # kwargs에서 use_reentrant 설정 확인 
-        use_reentrant = kwargs.get('use_reentrant', False)
-        print(f"📝 Gradient checkpointing 설정: use_reentrant={use_reentrant}")
-        
         # 1. Vision 모델에 gradient checkpointing 활성화
         try:
             if hasattr(self.vision_model, "gradient_checkpointing_enable"):
-                # 최신 transformers 버전에서는 kwargs 전달
-                if 'use_reentrant' in inspect.signature(self.vision_model.gradient_checkpointing_enable).parameters:
-                    self.vision_model.gradient_checkpointing_enable(use_reentrant=use_reentrant)
-                    print("✅ Vision 모델: gradient_checkpointing_enable(use_reentrant=False) 설정됨")
-                else:
-                    self.vision_model.gradient_checkpointing_enable()
-                    print("✅ Vision 모델: gradient_checkpointing_enable() 메서드 사용 성공")
+                self.vision_model.gradient_checkpointing_enable()
+                print("✅ Vision 모델: gradient_checkpointing_enable 메서드 사용 성공")
             elif hasattr(self.vision_model, "config") and hasattr(self.vision_model.config, "gradient_checkpointing"):
                 self.vision_model.config.gradient_checkpointing = True
-                print("✅ Vision 모델: config.gradient_checkpointing = True 설정 성공")
+                print("✅ Vision 모델: config.gradient_checkpointing 설정 성공")
             else:
                 # 대체 방법: 직접 속성 설정
                 self.vision_model.gradient_checkpointing = True
                 print("✅ Vision 모델: 직접 속성 설정 성공")
                 
             # Vision 모델 파라미터 동결 확인
-            vision_frozen = not any(p.requires_grad for p in self.vision_model.parameters())
-            if vision_frozen:
-                print("📝 참고: Vision 모델은 동결 상태입니다.")
-                print("⚠️ Vision 모델이 동결되어 있어도 gradient_checkpointing은 활성화합니다.")
-                print("   Outputs will need gradients for projector training!")
+            if not any(p.requires_grad for p in self.vision_model.parameters()):
+                print("📝 참고: Vision 모델은 동결 상태라 그래디언트 계산이 필요하지 않습니다.")
         except Exception as e:
             print(f"⚠️ Vision 모델 gradient checkpointing 활성화 실패: {str(e)}")
             
         # 2. Language 모델에 gradient checkpointing 활성화 
         try:
             if hasattr(self.language_model, "gradient_checkpointing_enable"):
-                # 최신 transformers 버전에서는 kwargs 전달
-                if 'use_reentrant' in inspect.signature(self.language_model.gradient_checkpointing_enable).parameters:
-                    self.language_model.gradient_checkpointing_enable(use_reentrant=use_reentrant)
-                    print("✅ Language 모델: gradient_checkpointing_enable(use_reentrant=False) 설정됨")
-                else:
-                    self.language_model.gradient_checkpointing_enable()
-                    print("✅ Language 모델: gradient_checkpointing_enable() 메서드 사용 성공")
+                self.language_model.gradient_checkpointing_enable()
+                print("✅ Language 모델: gradient_checkpointing_enable 메서드 사용 성공")
             elif hasattr(self.language_model, "config") and hasattr(self.language_model.config, "gradient_checkpointing"):
                 self.language_model.config.gradient_checkpointing = True
-                print("✅ Language 모델: config.gradient_checkpointing = True 설정 성공")
+                print("✅ Language 모델: config.gradient_checkpointing 설정 성공")
             else:
                 # 대체 방법: 직접 속성 설정
                 self.language_model.gradient_checkpointing = True
                 print("✅ Language 모델: 직접 속성 설정 성공")
                 
             # Language 모델 파라미터 동결 확인
-            language_frozen = not any(p.requires_grad for p in self.language_model.parameters())
-            if language_frozen:
-                print("📝 참고: Language 모델은 동결 상태입니다.")
+            if not any(p.requires_grad for p in self.language_model.parameters()):
+                print("📝 참고: Language 모델은 동결 상태라 그래디언트 계산이 필요하지 않습니다.")
         except Exception as e:
             print(f"⚠️ Language 모델 gradient checkpointing 활성화 실패: {str(e)}")
         
-        # 3. Projector 모듈에 그래디언트 흐름 보장 메커니즘 적용
+        # 3. Projector 모듈에 gradient checkpointing 적용
         if self.projector is not None:
             try:
                 # 프로젝터 구조 확인
@@ -758,43 +679,24 @@ class PanoVLM(PreTrainedModel):
                     print(f"프로젝터 구조: {self.projector}")
                     print(f"프로젝터 레이어 수: {len(list(self.projector.children()))}")
                     
-                    # 프로젝터 파라미터 수 계산
-                    projector_params = sum(p.numel() for p in self.projector.parameters())
-                    print(f"프로젝터 총 파라미터 수: {projector_params:,}")
-                    
                     # 원래 forward 메서드 저장
                     if not hasattr(self.projector, '_original_forward'):
                         self.projector._original_forward = self.projector.forward
                     original_forward = self.projector._original_forward
                     
-                    # 프로젝터 레이어는 gradient checkpointing 필요 없음 (작은 레이어)
+                    # 프로젝터 레이어는 gradient checkpointing 불필요 (너무 작음)
                     print("📝 프로젝터는 작은 모듈이라 일반 gradient checkpointing 대신 직접 그래디언트 전파를 개선합니다.")
                     
                     # 입력에 대해 requires_grad를 보장하는 래퍼 함수
                     def grad_preserving_forward(x, *args, **kwargs):
-                        # 항상 그래디언트 계산을 보장
-                        with torch.set_grad_enabled(True):
-                            # 학습 중이라면 항상 그래디언트 요구를 보장
-                            if self.training:
-                                # 입력 텐서에 그래디언트 요구 설정
-                                if not x.requires_grad:
-                                    x = x.detach().clone()
-                                    x.requires_grad_(True)
-                                    
-                            # 원래 forward 함수 호출 (그래디언트 보존)
-                            result = original_forward(x, *args, **kwargs)
-                            
-                            # 디버깅: 첫 10번의 forward 패스에서만 로그 출력
-                            if self.training and not hasattr(self, '_projector_forward_count'):
-                                self._projector_forward_count = 0
+                        # 학습 중이고 그래디언트가 필요한 경우에만 수행
+                        if self.training and any(p.requires_grad for p in self.projector.parameters()):
+                            # 입력 텐서에 그래디언트 요구 설정
+                            if not x.requires_grad:
+                                x = x.detach().clone().requires_grad_(True)
                                 
-                            if self.training and self._projector_forward_count < 10:
-                                self._projector_forward_count += 1
-                                print(f"🔄 Projector forward #{self._projector_forward_count}: " 
-                                      f"input.requires_grad={x.requires_grad}, " 
-                                      f"output.requires_grad={result.requires_grad}")
-                                
-                            return result
+                        # 원래 forward 함수 호출 (그래디언트 보존)
+                        return original_forward(x, *args, **kwargs)
                     
                     # 프로젝터의 forward 메서드 교체
                     self.projector.forward = grad_preserving_forward
@@ -802,36 +704,19 @@ class PanoVLM(PreTrainedModel):
                 else:
                     # 단일 레이어(Linear 등)인 경우
                     print("📝 Projector는 단일 레이어 구조입니다.")
-                    
-                    # 원래 forward 메서드 백업 및 교체
-                    if hasattr(self.projector, "forward") and not hasattr(self.projector, '_original_forward'):
-                        self.projector._original_forward = self.projector.forward
-                        
-                        # 단일 레이어용 그래디언트 보존 함수
-                        def simple_grad_preserving_forward(x, *args, **kwargs):
-                            with torch.set_grad_enabled(True):
-                                if self.training and not x.requires_grad:
-                                    x = x.detach().clone().requires_grad_(True)
-                                return self.projector._original_forward(x, *args, **kwargs)
-                                
-                        self.projector.forward = simple_grad_preserving_forward
-                        print("✅ 단일 레이어 Projector에 그래디언트 보존 함수 적용 성공")
                 
                 # Projector 모델 학습 상태 확인
-                projector_trainable = any(p.requires_grad for p in self.projector.parameters())
-                if projector_trainable:
-                    print("✅ Projector는 학습 상태입니다.")
+                if any(p.requires_grad for p in self.projector.parameters()):
+                    print("📝 Projector는 학습 상태입니다.")
                     
-                    # 학습 가능한 파라미터 정보 출력
-                    trainable_params = [(name, param.shape, param.numel()) for name, param in self.projector.named_parameters() if param.requires_grad]
-                    for name, shape, numel in trainable_params:
-                        print(f"  - {name}: shape={shape}, params={numel:,}")
+                    # 명시적으로 그래디언트 전파 가능하도록 각 파라미터 확인
+                    for name, param in self.projector.named_parameters():
+                        if param.requires_grad:
+                            print(f"  - {name}: requires_grad=True")
                 else:
-                    print("⚠️ Projector는 동결 상태입니다 - 학습되지 않을 것입니다!")
+                    print("📝 Projector는 동결 상태입니다.")
             except Exception as e:
                 print(f"⚠️ Projector 설정 실패: {str(e)}")
-                import traceback
-                traceback.print_exc()
             
         # 4. 캐시 사용을 비활성화하여 메모리 절약
         if hasattr(self.language_model, "config") and hasattr(self.language_model.config, "use_cache"):
@@ -840,18 +725,10 @@ class PanoVLM(PreTrainedModel):
         
         # 5. 기타 사용자 제공 kwargs 처리
         for key, value in kwargs.items():
-            if key != 'use_reentrant':  # 이미 처리된 항목
-                print(f"📝 추가 설정: {key}={value}")
+            print(f"📝 추가 설정: {key}={value}")
         
-        # 전체 모델 설정
         self.gradient_checkpointing = True
-        
-        # 최종 상태 요약
-        print("\n----- 최종 설정 상태 -----")
-        print(f"Gradient Checkpointing: {self.gradient_checkpointing}")
-        print(f"Vision Model Frozen: {vision_frozen}")
-        print(f"Language Model Frozen: {language_frozen}")
-        print(f"Projector Trainable: {projector_trainable}")
+        print("✅ 모델 전체 gradient_checkpointing 활성화 완료")
         print("========================================\n")
 
     def gradient_checkpointing_disable(self):
@@ -890,27 +767,21 @@ class PanoVLM(PreTrainedModel):
         except Exception as e:
             print(f"⚠️ Language 모델 gradient checkpointing 비활성화 실패: {str(e)}")
         
-        # 3. Projector 모듈에 적용된 래핑 원복
-        if self.projector is not None:
+        # 3. Projector 모듈에 적용된 gradient checkpointing 원복 (필요한 경우)
+        if self.projector is not None and isinstance(self.projector, nn.Sequential):
             try:
                 # 원래 forward 메서드가 랩핑되었다면 원래 메서드로 복구
                 if hasattr(self.projector, "_original_forward"):
                     self.projector.forward = self.projector._original_forward
                     delattr(self.projector, "_original_forward")
                     print("✅ Projector: 원래 forward 메서드로 복구됨")
-                
-                # 그래디언트 추적 카운터 초기화
-                if hasattr(self, "_projector_forward_count"):
-                    delattr(self, "_projector_forward_count")
-                if hasattr(self, "_debug_counter"):
-                    delattr(self, "_debug_counter")
             except Exception as e:
                 print(f"⚠️ Projector gradient checkpointing 비활성화 실패: {str(e)}")
         
-        # 4. 캐시 사용 재활성화 (추론 성능 향상)
+        # 4. 캐시 사용 재활성화
         if hasattr(self.language_model, "config") and hasattr(self.language_model.config, "use_cache"):
             self.language_model.config.use_cache = True
-            print("✅ Language 모델 use_cache 재활성화됨 (추론 성능 향상)")
+            print("✅ Language 모델 use_cache 재활성화됨")
         
         self.gradient_checkpointing = False
         print("✅ 모델 전체 gradient_checkpointing 비활성화 완료")
