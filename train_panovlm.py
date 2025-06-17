@@ -494,7 +494,8 @@ def main():
         gradient_accumulation_steps=train_config.get('gradient_accumulation_steps', 4),
         # gradient_checkpointing 설정 (비-재진입 모드 사용)
         gradient_checkpointing=train_config.get('gradient_checkpointing', True),
-        gradient_checkpointing_kwargs={"use_reentrant": False},  # 최신 버전에서 권장되는 설정
+        gradient_checkpointing_kwargs={"use_reentrant": False},  # 더 안정적인 모드
+        torch_compile=False,  # 그래디언트 추적 문제 방지를 위해 비활성화
         learning_rate=float(train_config.get('learning_rate', 2e-5)),
         warmup_ratio=train_config.get('warmup_ratio', 0.1),
         weight_decay=train_config.get('weight_decay', 0.01),
@@ -615,6 +616,12 @@ def main():
         
         def __init__(self, model):
             self.model = model
+            # 프로젝터 파라미터 초기값 저장 (변화 추적용)
+            self.init_params = {}
+            if hasattr(model, "projector") and model.projector is not None:
+                for name, param in model.projector.named_parameters():
+                    if param.requires_grad:
+                        self.init_params[name] = param.data.clone().detach().cpu()
             
         def on_train_begin(self, args, state, control, **kwargs):
             """학습 시작 시 파라미터 상태 확인"""
@@ -622,10 +629,11 @@ def main():
             self._log_parameter_status()
             
         def on_step_end(self, args, state, control, **kwargs):
-            """일정 스텝마다 파라미터 변화 확인 (로깅 스텝의 10배 간격으로)"""
-            if state.global_step > 0 and state.global_step % (args.logging_steps * 10) == 0:
+            """일정 스텝마다 파라미터 변화 확인 (로깅 스텝의 5배 간격으로)"""
+            if state.global_step > 0 and state.global_step % (args.logging_steps * 5) == 0:
                 print(f"\n===== Step {state.global_step}: 파라미터 상태 확인 =====")
                 self._log_parameter_status()
+                self._check_param_updates()
                 
         def _log_parameter_status(self):
             """모델의 현재 파라미터 상태 로깅"""
@@ -647,7 +655,7 @@ def main():
             
             # 프로젝터 파라미터 상세 로깅 (학습 중인지 확인)
             if projector_requires_grad:
-                has_changing_params = False
+                has_meaningful_grads = False
                 print("\n----- Projector 파라미터 상태 -----")
                 for name, param in self.model.projector.named_parameters():
                     if param.requires_grad:
@@ -655,14 +663,68 @@ def main():
                         print(f"{name}: {grad_status}")
                         if param.grad is not None:
                             grad_norm = torch.norm(param.grad).item()
-                            if grad_norm > 1e-6:  # 그래디언트 크기가 의미있는지 확인
-                                has_changing_params = True
-                            print(f"  - 그래디언트 L2 norm: {grad_norm:.6f}")
+                            grad_max = torch.abs(param.grad).max().item() if param.grad is not None else 0
+                            if grad_norm > 1e-5:  # 그래디언트 크기가 의미있는지 확인
+                                has_meaningful_grads = True
+                            print(f"  - 그래디언트 L2 norm: {grad_norm:.6f}, 최대값: {grad_max:.6f}")
                 
-                if has_changing_params:
-                    print("✅ 프로젝터 파라미터가 정상적으로 학습 중입니다.")
+                if has_meaningful_grads:
+                    print("✅ 프로젝터 파라미터에 의미 있는 그래디언트가 있습니다.")
                 else:
                     print("⚠️ 프로젝터 파라미터가 requires_grad=True이지만 그래디언트가 없거나 매우 작습니다.")
+        
+        def _check_param_updates(self):
+            """프로젝터 파라미터가 실제로 업데이트되고 있는지 확인"""
+            if not self.init_params:
+                return
+                
+            print("\n----- 프로젝터 파라미터 변화 확인 -----")
+            any_changed = False
+            
+            for name, param in self.model.projector.named_parameters():
+                if name in self.init_params:
+                    # 현재 파라미터 값
+                    current = param.data.cpu()
+                    # 초기 파라미터 값
+                    initial = self.init_params[name]
+                    
+                    # 차이 계산
+                    diff = torch.norm(current - initial).item()
+                    max_diff = torch.max(torch.abs(current - initial)).item()
+                    
+                    change_status = "변화 없음" if diff < 1e-5 else "변화 있음"
+                    if diff >= 1e-5:
+                        any_changed = True
+                        
+                    print(f"{name}: {change_status} (L2 차이: {diff:.6f}, 최대 차이: {max_diff:.6f})")
+            
+            if any_changed:
+                print("✅ 프로젝터 파라미터가 실제로 업데이트되고 있습니다.")
+            else:
+                print("❗ 경고: 프로젝터 파라미터가 업데이트되지 않고 있습니다!")
+                
+            # 더 정확한 진단을 위해 각 단계 확인
+            print("\n----- 학습 진단 -----")
+            if not any_changed:
+                # 그래디언트 존재 여부
+                has_grads = any(p.grad is not None for p in self.model.projector.parameters() if p.requires_grad)
+                if not has_grads:
+                    print("❌ 문제 진단: 프로젝터에 그래디언트가 없습니다.")
+                    print("   가능한 원인:")
+                    print("   1. 역전파가 프로젝터까지 도달하지 않음")
+                    print("   2. 비전 모델에서 분리된 텐서가 그래디언트를 전달하지 않음")
+                    print("   3. forward 함수에서 텐서가 detach()되었을 수 있음")
+                else:
+                    print("❌ 문제 진단: 그래디언트는 있지만 파라미터가 업데이트되지 않음.")
+                    print("   가능한 원인:")
+                    print("   1. 옵티마이저가 프로젝터 파라미터를 포함하지 않음")
+                    print("   2. 학습률이 너무 낮음")
+                    print("   3. 그래디언트 클리핑이 너무 강함")
+                    
+            # 업데이트된 초기값으로 갱신 (최근 상태 비교용)
+            for name, param in self.model.projector.named_parameters():
+                if param.requires_grad:
+                    self.init_params[name] = param.data.clone().detach().cpu()
     
     # 커스텀 옵티마이저 클래스를 사용하여 프로젝터만 학습되도록 설정
     class ProjectorOnlyOptimizer(torch.optim.AdamW):
@@ -674,6 +736,7 @@ def main():
             param_names = []
             
             if hasattr(model, "projector") and model.projector is not None:
+                # 프로젝터 파라미터 추출
                 for name, param in model.projector.named_parameters():
                     if param.requires_grad:
                         projector_params.append(param)
@@ -681,7 +744,10 @@ def main():
             
             print(f"\n===== 프로젝터 전용 옵티마이저 초기화 =====")
             print(f"학습할 총 파라미터 수: {len(projector_params)}")
-            print(f"학습할 파라미터 이름: {', '.join(param_names)}")
+            print(f"학습할 총 파라미터 개수: {sum(p.numel() for p in projector_params):,}")
+            
+            if len(param_names) > 0:
+                print(f"학습할 파라미터 이름: {', '.join(param_names)}")
             
             if len(projector_params) == 0:
                 raise ValueError("학습할 프로젝터 파라미터가 없습니다. 프로젝터가 동결되었거나 존재하지 않습니다.")
@@ -689,16 +755,49 @@ def main():
             # 옵티마이저 초기화
             super().__init__(projector_params, lr=lr, weight_decay=weight_decay, **kwargs)
             
-        def step(self, closure=None):
-            # 그래디언트 유무 확인 및 정보 출력 (첫 번째 스텝에서만)
-            if not hasattr(self, '_first_step_done'):
-                grad_exists = any(p.grad is not None for group in self.param_groups for p in group['params'])
-                if not grad_exists:
-                    print("\n⚠️ 경고: 그래디언트가 없습니다! 학습이 제대로 진행되지 않을 수 있습니다.")
-                else:
-                    print("\n✅ 그래디언트가 정상적으로 계산되었습니다.")
-                self._first_step_done = True
+            # Vision 및 Language 모델 동결 상태 확인 (중요!)
+            vision_trainable = hasattr(model, "vision_model") and any(p.requires_grad for p in model.vision_model.parameters())
+            lang_trainable = hasattr(model, "language_model") and any(p.requires_grad for p in model.language_model.parameters())
             
+            if vision_trainable:
+                print("\n⚠️ 경고: Vision 모델에 학습 가능한 파라미터가 있습니다!")
+                print("Vision 모델은 완전히 동결되어야 합니다.")
+                
+            if lang_trainable:
+                print("\n⚠️ 경고: Language 모델에 학습 가능한 파라미터가 있습니다!")
+                print("Language 모델은 완전히 동결되어야 합니다.")
+            
+            if not (vision_trainable or lang_trainable):
+                print("\n✅ Vision 및 Language 모델은 올바르게 동결되었습니다.")
+            
+            # 그래디언트 추적 카운터 초기화
+            self._step_count = 0
+            self._log_interval = 10  # 10스텝마다 로그 출력
+                
+        def step(self, closure=None):
+            self._step_count += 1
+            
+            # 그래디언트 유무 확인 및 정보 출력
+            if self._step_count == 1 or self._step_count % self._log_interval == 0:
+                # 그래디언트 존재 여부 확인
+                grad_exists = any(p.grad is not None for group in self.param_groups for p in group['params'])
+                grad_nonzero = any(p.grad is not None and torch.abs(p.grad).max().item() > 1e-5 
+                                  for group in self.param_groups for p in group['params'])
+                
+                if not grad_exists:
+                    print(f"\n⚠️ 경고 (스텝 {self._step_count}): 그래디언트가 없습니다! 학습이 제대로 진행되지 않을 수 있습니다.")
+                elif not grad_nonzero:
+                    print(f"\n⚠️ 경고 (스텝 {self._step_count}): 그래디언트가 매우 작습니다! 학습이 느리게 진행될 수 있습니다.")
+                else:
+                    print(f"\n✅ (스텝 {self._step_count}): 그래디언트가 정상적으로 계산되었습니다.")
+                    
+                    # 그래디언트 노름 로깅 (디버깅용)
+                    for group_idx, group in enumerate(self.param_groups):
+                        for param_idx, p in enumerate(group['params']):
+                            if p.grad is not None:
+                                grad_norm = torch.norm(p.grad).item()
+                                print(f"  파라미터 그룹 {group_idx}, 파라미터 {param_idx}: 그래디언트 노름 = {grad_norm:.6f}")
+                
             # 기본 스텝 수행
             return super().step(closure)
     
