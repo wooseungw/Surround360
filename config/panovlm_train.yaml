@@ -28,7 +28,7 @@ data:
   max_length: 512
   do_crop: true  # 파노라마 이미지 크롭 여부
   fov: 90.0  # 시야각 (도)
-  overlap_ratio: 0.2  # 크롭 간 중첩 비율
+  overlap_ratio: 0.5  # 크롭 간 중첩 비율
 
 # 학습 설정
 training:

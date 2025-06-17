@@ -541,19 +541,11 @@ class PanoVLM(PreTrainedModel):
                 attention_mask=attention_mask,
                 labels=labels,
                 interpolate_pos_encoding=interpolate_pos_encoding
-            )
-            
-            # 명시적으로 requires_grad=True 설정하여 그래디언트 계산 보장
+            )                # 명시적으로 requires_grad=True 설정하여 그래디언트 계산 보장
             if self.training and any(p.requires_grad for p in self.parameters()):
                 # 입력 임베딩에 그래디언트 흐름 보장
                 if not inputs_embeds.requires_grad:
                     inputs_embeds = inputs_embeds.detach().clone().requires_grad_(True)
-                    
-                if self.projector is not None and any(p.requires_grad for p in self.projector.parameters()):
-                    # 프로젝터가 학습 중일 때 추가 확인
-                    if not inputs_embeds.requires_grad:
-                        print("경고: 입력 임베딩에 requires_grad=True 설정 필요")
-                        inputs_embeds.requires_grad_(True)
             
             # LLM 모델에 전달할 인자 구성
             model_kwargs = {

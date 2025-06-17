@@ -21,11 +21,10 @@ Image.MAX_IMAGE_PIXELS = None
 
 import wandb
 from pathlib import Path
-
 import yaml
 import argparse
-import inspect
 from typing import Dict, List, Optional, Union, Any
+from contextlib import nullcontext
 
 from py360convert import e2p
 import numpy as np
@@ -169,16 +168,6 @@ class PanoVLMDataset(Dataset):
         labels = text_inputs.input_ids.clone()
         labels[labels == self.tokenizer.pad_token_id] = IGNORE_INDEX
         
-        # 디버깅 (첫 번째 샘플에 대해서만)
-        if idx == 0:
-            print("==Input sequence==")
-            print(text_inputs.input_ids[0])
-            print(self.tokenizer.decode(text_inputs.input_ids[0], skip_special_tokens=False))
-            print("==Attention mask==")
-            print(text_inputs.attention_mask[0])
-            print("==Labels==")
-            print(labels[0])
-            
         # Hugging Face Trainer가 기대하는 형태로 반환
         return {
             "pixel_values": pixel_values.squeeze(0),  # (Num Crops, C, H, W)
@@ -657,25 +646,9 @@ def main():
             print(f"Language Model - requires_grad: {language_requires_grad}, grad exists: {language_grad_exists}")
             print(f"Projector - requires_grad: {projector_requires_grad}, grad exists: {projector_grad_exists}")
             
-            # 프로젝터 파라미터 상세 로깅 (학습 중인지 확인)
-            if projector_requires_grad:
-                has_meaningful_grads = False
-                print("\n----- Projector 파라미터 상태 -----")
-                for name, param in self.model.projector.named_parameters():
-                    if param.requires_grad:
-                        grad_status = "그래디언트 있음" if param.grad is not None else "그래디언트 없음"
-                        print(f"{name}: {grad_status}")
-                        if param.grad is not None:
-                            grad_norm = torch.norm(param.grad).item()
-                            grad_max = torch.abs(param.grad).max().item() if param.grad is not None else 0
-                            if grad_norm > 1e-5:  # 그래디언트 크기가 의미있는지 확인
-                                has_meaningful_grads = True
-                            print(f"  - 그래디언트 L2 norm: {grad_norm:.6f}, 최대값: {grad_max:.6f}")
-                
-                if has_meaningful_grads:
-                    print("✅ 프로젝터 파라미터에 의미 있는 그래디언트가 있습니다.")
-                else:
-                    print("⚠️ 프로젝터 파라미터가 requires_grad=True이지만 그래디언트가 없거나 매우 작습니다.")
+            # 프로젝터 파라미터 상세 로깅 축소 (필요시 확인 가능)
+            if projector_requires_grad and projector_grad_exists:
+                print("✅ 프로젝터 파라미터에 그래디언트가 있습니다.")
         
         def _check_param_updates(self):
             """프로젝터 파라미터가 실제로 업데이트되고 있는지 확인"""
@@ -694,36 +667,14 @@ def main():
                     
                     # 차이 계산
                     diff = torch.norm(current - initial).item()
-                    max_diff = torch.max(torch.abs(current - initial)).item()
                     
-                    change_status = "변화 없음" if diff < 1e-5 else "변화 있음"
                     if diff >= 1e-5:
                         any_changed = True
                         
-                    print(f"{name}: {change_status} (L2 차이: {diff:.6f}, 최대 차이: {max_diff:.6f})")
-            
             if any_changed:
-                print("✅ 프로젝터 파라미터가 실제로 업데이트되고 있습니다.")
+                print("✅ 프로젝터 파라미터가 업데이트되고 있습니다.")
             else:
                 print("❗ 경고: 프로젝터 파라미터가 업데이트되지 않고 있습니다!")
-                
-            # 더 정확한 진단을 위해 각 단계 확인
-            print("\n----- 학습 진단 -----")
-            if not any_changed:
-                # 그래디언트 존재 여부
-                has_grads = any(p.grad is not None for p in self.model.projector.parameters() if p.requires_grad)
-                if not has_grads:
-                    print("❌ 문제 진단: 프로젝터에 그래디언트가 없습니다.")
-                    print("   가능한 원인:")
-                    print("   1. 역전파가 프로젝터까지 도달하지 않음")
-                    print("   2. 비전 모델에서 분리된 텐서가 그래디언트를 전달하지 않음")
-                    print("   3. forward 함수에서 텐서가 detach()되었을 수 있음")
-                else:
-                    print("❌ 문제 진단: 그래디언트는 있지만 파라미터가 업데이트되지 않음.")
-                    print("   가능한 원인:")
-                    print("   1. 옵티마이저가 프로젝터 파라미터를 포함하지 않음")
-                    print("   2. 학습률이 너무 낮음")
-                    print("   3. 그래디언트 클리핑이 너무 강함")
                     
             # 업데이트된 초기값으로 갱신 (최근 상태 비교용)
             for name, param in self.model.projector.named_parameters():
@@ -810,7 +761,6 @@ def main():
         eval_dataset=eval_dataset,
         data_collator=data_collator,
         optimizers=(projector_optimizer_factory(model), None),  # (optimizer, scheduler)
-        # compute_metrics=compute_metrics_wrapper,  # 필요시 추가
         callbacks=[ParameterMonitoringCallback(model)]
     )
   
