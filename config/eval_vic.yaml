@@ -1,5 +1,5 @@
 model:
-    name_or_path: "saved_models/blip2_360" # HuggingFace 형식으로 저장된 경로
+    name_or_path: "saved_models/surround_360_add_vicloss2" # HuggingFace 형식으로 저장된 경로
 data:
     dir: "data/quic360"
     test_file: "test.csv" # CSV: url,query,annotation
@@ -15,4 +15,4 @@ generate:
     num_beams: 5
 device: "cuda"
 output:
-    result_file: "outputs/blip2_360_eval_results.json"
+    result_file: "outputs/blip2_vic_360_eval_results.json"
