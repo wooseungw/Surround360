@@ -1,3 +1,3 @@
 export CUDA_VISIBLE_DEVICES=1
 
-python eval.py --config config/eval_vic.yaml
+python eval.py --config config/eval_surround.yaml
