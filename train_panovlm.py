@@ -492,7 +492,9 @@ def main():
         per_device_train_batch_size=train_config.get('batch_size', {}).get('train', 4),
         per_device_eval_batch_size=train_config.get('batch_size', {}).get('eval', 8),
         gradient_accumulation_steps=train_config.get('gradient_accumulation_steps', 4),
+        # gradient_checkpointing 설정 (비-재진입 모드 사용)
         gradient_checkpointing=train_config.get('gradient_checkpointing', True),
+        gradient_checkpointing_kwargs={"use_reentrant": False},  # 최신 버전에서 권장되는 설정
         learning_rate=float(train_config.get('learning_rate', 2e-5)),
         warmup_ratio=train_config.get('warmup_ratio', 0.1),
         weight_decay=train_config.get('weight_decay', 0.01),
@@ -662,13 +664,62 @@ def main():
                 else:
                     print("⚠️ 프로젝터 파라미터가 requires_grad=True이지만 그래디언트가 없거나 매우 작습니다.")
     
-    # 트레이너 초기화
+    # 커스텀 옵티마이저 클래스를 사용하여 프로젝터만 학습되도록 설정
+    class ProjectorOnlyOptimizer(torch.optim.AdamW):
+        """프로젝터만 학습하는 커스텀 옵티마이저"""
+        
+        def __init__(self, model, lr=1e-5, weight_decay=0.0, **kwargs):
+            # 프로젝터 파라미터만 필터링
+            projector_params = []
+            param_names = []
+            
+            if hasattr(model, "projector") and model.projector is not None:
+                for name, param in model.projector.named_parameters():
+                    if param.requires_grad:
+                        projector_params.append(param)
+                        param_names.append(f"projector.{name}")
+            
+            print(f"\n===== 프로젝터 전용 옵티마이저 초기화 =====")
+            print(f"학습할 총 파라미터 수: {len(projector_params)}")
+            print(f"학습할 파라미터 이름: {', '.join(param_names)}")
+            
+            if len(projector_params) == 0:
+                raise ValueError("학습할 프로젝터 파라미터가 없습니다. 프로젝터가 동결되었거나 존재하지 않습니다.")
+            
+            # 옵티마이저 초기화
+            super().__init__(projector_params, lr=lr, weight_decay=weight_decay, **kwargs)
+            
+        def step(self, closure=None):
+            # 그래디언트 유무 확인 및 정보 출력 (첫 번째 스텝에서만)
+            if not hasattr(self, '_first_step_done'):
+                grad_exists = any(p.grad is not None for group in self.param_groups for p in group['params'])
+                if not grad_exists:
+                    print("\n⚠️ 경고: 그래디언트가 없습니다! 학습이 제대로 진행되지 않을 수 있습니다.")
+                else:
+                    print("\n✅ 그래디언트가 정상적으로 계산되었습니다.")
+                self._first_step_done = True
+            
+            # 기본 스텝 수행
+            return super().step(closure)
+    
+    # 커스텀 옵티마이저 생성 함수
+    def projector_optimizer_factory(model):
+        # 프로젝터 전용 옵티마이저 생성
+        return ProjectorOnlyOptimizer(
+            model=model,
+            lr=float(train_config.get('learning_rate', 2e-5)),
+            weight_decay=train_config.get('weight_decay', 0.01),
+            eps=1e-8
+        )
+    
+    # 트레이너 초기화 (커스텀 옵티마이저 적용)
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         data_collator=data_collator,
+        optimizers=(projector_optimizer_factory(model), None),  # (optimizer, scheduler)
         # compute_metrics=compute_metrics_wrapper,  # 필요시 추가
         callbacks=[ParameterMonitoringCallback(model)]
     )

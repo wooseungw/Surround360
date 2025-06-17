@@ -448,12 +448,31 @@ class PanoVLM(PreTrainedModel):
         
         # 3. Projector 적용
         if self.projector is not None:
+            # 학습 중이고 프로젝터가 학습 가능한 경우, vision_embeds에 requires_grad=True 설정
+            if self.training and any(p.requires_grad for p in self.projector.parameters()):
+                # 먼저 텐서 분리하여 새 텐서 생성 (그래디언트 흐름 보장)
+                if not vision_embeds.requires_grad:
+                    # 분리된 복사본 만들고 그래디언트 요구로 설정
+                    vision_embeds = vision_embeds.detach().clone().requires_grad_(True)
+            
             if is_panorama:
                 B, P, S, D = vision_embeds.shape
-                vision_embeds = vision_embeds.view(-1, D)  # 마지막 차원만 투영
-                vision_embeds = self.projector(vision_embeds)
-                vision_embeds = vision_embeds.view(B, P, S, -1)  # 원래 형태로 복원
+                vision_embeds_reshaped = vision_embeds.view(-1, D)  # 마지막 차원만 투영
+                
+                # 프로젝터 통과
+                if self.training and any(p.requires_grad for p in self.projector.parameters()):
+                    # 그래디언트 유지 확인
+                    assert vision_embeds_reshaped.requires_grad, "프로젝터 입력에 requires_grad=True가 필요합니다"
+                
+                # 프로젝터 적용
+                vision_embeds_projected = self.projector(vision_embeds_reshaped)
+                vision_embeds = vision_embeds_projected.view(B, P, S, -1)  # 원래 형태로 복원
             else:
+                # 프로젝터 통과 전 그래디언트 유지 확인
+                if self.training and any(p.requires_grad for p in self.projector.parameters()):
+                    # 그래디언트 유지 확인
+                    assert vision_embeds.requires_grad, "프로젝터 입력에 requires_grad=True가 필요합니다"
+                
                 vision_embeds = self.projector(vision_embeds)
         
         # 4. 텍스트와 이미지 임베딩 결합
@@ -525,8 +544,16 @@ class PanoVLM(PreTrainedModel):
             )
             
             # 명시적으로 requires_grad=True 설정하여 그래디언트 계산 보장
-            if self.training and not inputs_embeds.requires_grad:
-                inputs_embeds.requires_grad_(True)
+            if self.training and any(p.requires_grad for p in self.parameters()):
+                # 입력 임베딩에 그래디언트 흐름 보장
+                if not inputs_embeds.requires_grad:
+                    inputs_embeds = inputs_embeds.detach().clone().requires_grad_(True)
+                    
+                if self.projector is not None and any(p.requires_grad for p in self.projector.parameters()):
+                    # 프로젝터가 학습 중일 때 추가 확인
+                    if not inputs_embeds.requires_grad:
+                        print("경고: 입력 임베딩에 requires_grad=True 설정 필요")
+                        inputs_embeds.requires_grad_(True)
             
             # LLM 모델에 전달할 인자 구성
             model_kwargs = {
@@ -643,32 +670,53 @@ class PanoVLM(PreTrainedModel):
         except Exception as e:
             print(f"⚠️ Language 모델 gradient checkpointing 활성화 실패: {str(e)}")
         
-        # 3. Projector 모듈에 gradient checkpointing 적용 (가능한 경우)
+        # 3. Projector 모듈에 gradient checkpointing 적용
         if self.projector is not None:
             try:
-                # Linear 레이어와 같은 단일 연산이 아닌 경우에만 적용
-                if isinstance(self.projector, nn.Sequential) and len(list(self.projector.children())) > 1:
-                    # checkpoint 함수를 직접 적용할 수 있는 형태로 랩핑
-                    original_forward = self.projector.forward
+                # 프로젝터 구조 확인
+                if isinstance(self.projector, nn.Sequential):
+                    # 프로젝터 구성 정보 출력 (디버깅)
+                    print(f"프로젝터 구조: {self.projector}")
+                    print(f"프로젝터 레이어 수: {len(list(self.projector.children()))}")
                     
-                    def checkpointed_forward(*args, **kwargs):
-                        if torch.is_grad_enabled() and any(p.requires_grad for p in self.projector.parameters()):
-                            from torch.utils.checkpoint import checkpoint
-                            return checkpoint(original_forward, *args, **kwargs)
-                        else:
-                            return original_forward(*args, **kwargs)
+                    # 원래 forward 메서드 저장
+                    if not hasattr(self.projector, '_original_forward'):
+                        self.projector._original_forward = self.projector.forward
+                    original_forward = self.projector._original_forward
+                    
+                    # 프로젝터 레이어는 gradient checkpointing 불필요 (너무 작음)
+                    print("📝 프로젝터는 작은 모듈이라 일반 gradient checkpointing 대신 직접 그래디언트 전파를 개선합니다.")
+                    
+                    # 입력에 대해 requires_grad를 보장하는 래퍼 함수
+                    def grad_preserving_forward(x, *args, **kwargs):
+                        # 학습 중이고 그래디언트가 필요한 경우에만 수행
+                        if self.training and any(p.requires_grad for p in self.projector.parameters()):
+                            # 입력 텐서에 그래디언트 요구 설정
+                            if not x.requires_grad:
+                                x = x.detach().clone().requires_grad_(True)
+                                
+                        # 원래 forward 함수 호출 (그래디언트 보존)
+                        return original_forward(x, *args, **kwargs)
                     
                     # 프로젝터의 forward 메서드 교체
-                    self.projector.forward = checkpointed_forward
-                    print("✅ Projector: 커스텀 gradient checkpointing 적용 성공")
-                    
-                    # Projector 모델 학습 상태 확인
-                    if any(p.requires_grad for p in self.projector.parameters()):
-                        print("📝 Projector는 학습 상태이므로 gradient checkpointing이 적용됩니다.")
+                    self.projector.forward = grad_preserving_forward
+                    print("✅ Projector: 그래디언트 보존 forward 함수 적용 성공")
                 else:
-                    print("📝 Projector는 단순 구조라 gradient checkpointing이 불필요합니다.")
+                    # 단일 레이어(Linear 등)인 경우
+                    print("📝 Projector는 단일 레이어 구조입니다.")
+                
+                # Projector 모델 학습 상태 확인
+                if any(p.requires_grad for p in self.projector.parameters()):
+                    print("📝 Projector는 학습 상태입니다.")
+                    
+                    # 명시적으로 그래디언트 전파 가능하도록 각 파라미터 확인
+                    for name, param in self.projector.named_parameters():
+                        if param.requires_grad:
+                            print(f"  - {name}: requires_grad=True")
+                else:
+                    print("📝 Projector는 동결 상태입니다.")
             except Exception as e:
-                print(f"⚠️ Projector gradient checkpointing 설정 실패: {str(e)}")
+                print(f"⚠️ Projector 설정 실패: {str(e)}")
             
         # 4. 캐시 사용을 비활성화하여 메모리 절약
         if hasattr(self.language_model, "config") and hasattr(self.language_model.config, "use_cache"):
