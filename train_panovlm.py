@@ -657,26 +657,7 @@ def main():
             print(f"Language Model - requires_grad: {language_requires_grad}, grad exists: {language_grad_exists}")
             print(f"Projector - requires_grad: {projector_requires_grad}, grad exists: {projector_grad_exists}")
             
-            # 프로젝터 파라미터 상세 로깅 (학습 중인지 확인)
-            if projector_requires_grad:
-                has_meaningful_grads = False
-                print("\n----- Projector 파라미터 상태 -----")
-                for name, param in self.model.projector.named_parameters():
-                    if param.requires_grad:
-                        grad_status = "그래디언트 있음" if param.grad is not None else "그래디언트 없음"
-                        print(f"{name}: {grad_status}")
-                        if param.grad is not None:
-                            grad_norm = torch.norm(param.grad).item()
-                            grad_max = torch.abs(param.grad).max().item() if param.grad is not None else 0
-                            if grad_norm > 1e-5:  # 그래디언트 크기가 의미있는지 확인
-                                has_meaningful_grads = True
-                            print(f"  - 그래디언트 L2 norm: {grad_norm:.6f}, 최대값: {grad_max:.6f}")
-                
-                if has_meaningful_grads:
-                    print("✅ 프로젝터 파라미터에 의미 있는 그래디언트가 있습니다.")
-                else:
-                    print("⚠️ 프로젝터 파라미터가 requires_grad=True이지만 그래디언트가 없거나 매우 작습니다.")
-        
+            
         def _check_param_updates(self):
             """프로젝터 파라미터가 실제로 업데이트되고 있는지 확인"""
             if not self.init_params:
