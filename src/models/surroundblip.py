@@ -2212,9 +2212,12 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         two
         ```"""
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        # 디버깅을 위한 초기 입력값 정보 출력
+        print("="*50)
+        print("SurroundBlip forward 호출 시작")
         # step 0: remove patch dimensions from pixel_values
-        # print("pixel_values", pixel_values.shape)
         B, P, C, H, W = pixel_values.shape
+        print(f"입력 이미지 크기: [B={B}, P={P}, C={C}, H={H}, W={W}]")
         pixel_values = pixel_values.view(B * P, C, H, W)
         
         # step 1: forward the images through the vision encoder,
@@ -2337,29 +2340,23 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
                 for key in vicreg_losses:
                     vicreg_losses[key] /= num_pairs
         
-        # 다음 처리를 위해 spatial_embeds를 다시 적절한 형태로 변환
-        if spatial_embeds is not None:
-            # 정상적으로 공간 임베딩이 생성된 경우
-            if S == 257:
-                # CLS 토큰이 있는 경우 처리 - CLS 토큰이 제거된 상태이므로 256개만 있음
-                H, W = 16, 16  # 16x16=256 패치
-                # 원래 CLS 토큰을 포함한 벡터로 계속 진행
-                image_embeds = original_image_embeds
-                S_actual = S  # CLS 토큰 포함하여 사용
-            else:
-                # 일반 케이스: 2D 공간 형태에서 다시 변환
-                image_embeds = spatial_embeds.view(B, P * H * W, D)
-                S_actual = H * W  # 실제 사용되는 시퀀스 길이
-        else:
-            # 공간 임베딩 생성 실패 시 원본 사용
-            image_embeds = original_image_embeds
-            S_actual = S
-            
-        # attention mask for tokens
-        image_attention_mask = torch.ones((B, image_embeds.size(1)), dtype=torch.long, device=image_embeds.device)
+        # 원본 이미지 임베딩은 (B*P, S, D) 형태입니다.
+        # Q-Former로 전달하기 전에 (B, P*S, D) 형태로 변환해야 합니다.
+        # 이렇게 해야 배치 크기가 B로 유지되며 어텐션 마스크와 일관성이 유지됩니다.
+        image_embeds = original_image_embeds.reshape(B, P, S, D)  # 먼저 (B, P, S, D)로 변환
+        image_embeds = image_embeds.reshape(B, P * S, D)          # 그런 다음 (B, P*S, D)로 변환
+        
+        # 어텐션 마스크 생성 - 배치 크기 B를 유지하고, 시퀀스 길이는 P*S
+        image_attention_mask = torch.ones((B, P * S), dtype=torch.long, device=image_embeds.device)
         
         query_tokens = self.query_tokens.expand(image_embeds.shape[0], -1, -1)
-        # print("query_tokens", query_tokens.shape)
+        
+        # 배치 차원이 일치하는지 확인
+        assert query_tokens.shape[0] == image_embeds.shape[0], "배치 차원이 일치하지 않습니다"
+        assert query_tokens.shape[0] == image_attention_mask.shape[0], "쿼리 토큰과 어텐션 마스크의 배치 차원이 일치하지 않습니다"
+        assert image_embeds.shape[0] == image_attention_mask.shape[0], "이미지 임베딩과 어텐션 마스크의 배치 차원이 일치하지 않습니다"
+        assert image_embeds.shape[1] == image_attention_mask.shape[1], "이미지 임베딩과 어텐션 마스크의 시퀀스 길이가 일치하지 않습니다"
+        
         query_outputs = self.qformer(
             query_embeds=query_tokens,
             encoder_hidden_states=image_embeds,
