@@ -2231,57 +2231,75 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         # 원본 (B*P, S, D) 형태의 image_embeds를 유지
         original_image_embeds = vision_outputs[0]  # (B*P, S, D)
         
-        # VICReg 손실 계산 부분 수정
+        # 패치 토큰을 2D 공간 구조로 재구성 (B,P,H,W,D)
+        # S=196인 경우 기본 ViT 패치는 14x14 그리드
+        H = int(S ** 0.5)  # 예: 196 -> 14
+        W = H
+        
+        if H*W != S:
+            # 완전한 제곱수가 아니라면 직접 지정 필요
+            H, W = 14, 14  # 혹은 다른 적절한 값으로 설정
+
+        # 2D 공간 구조로 재구성 (B,P,H,W,D)
+        spatial_embeds = original_image_embeds.view(B, P, H, W, D)
+        
+        # VICReg 손실 계산 부분 수정 - 2D 공간 관계 활용
         overlap_loss = 0.0
         vicreg_losses = {"sim_loss": 0.0, "var_loss": 0.0, "cov_loss": 0.0}
-        half_size = S // 2  # 정수 나눗셈
         
+        # 2D 공간에서 인접 관계 계산
         if P > 1:  # 여러 패치가 있을 때만 계산
-            # 원본 이미지 임베딩을 (B, P, S, D) 형태로 재구성
-            reshaped_embeds = original_image_embeds.view(B, P, S, D)
-            
-            # 메모리 효율성 증가를 위한 선택적 샘플링
-            # 인접한 패치 쌍 중 일부만 샘플링 (최대 4개)
-            sample_step = max(1, (P - 1) // 4)
-            sampled_indices = list(range(0, P-1, sample_step))[:4]
-            
             vicreg_total_loss = 0.0
             num_pairs = 0
             
-            # 각 샘플링된 패치 쌍에 대해 VICReg 손실 계산
-            for i in sampled_indices:
-                # 현재 패치의 오른쪽 절반과 다음 패치의 왼쪽 절반
-                curr_patch_right_half = reshaped_embeds[:, i, -half_size:, :]
-                next_patch_left_half = reshaped_embeds[:, i+1, :half_size, :]
+            # 인접 패치 쌍 찾기 (예: 파노라마인 경우 왼쪽-오른쪽 경계)
+            # 여기서는 간단한 원형 연결을 가정함
+            for i in range(P):
+                next_i = (i + 1) % P  # 원형 구조를 위한 모듈로 연산
+                
+                # 현재 패치의 오른쪽 경계와 다음 패치의 왼쪽 경계
+                # 2D 구조에서 W 방향 경계에서 추출
+                current_right_border = spatial_embeds[:, i, :, -1, :]  # (B, H, D)
+                next_left_border = spatial_embeds[:, next_i, :, 0, :]  # (B, H, D)
                 
                 # 메모리 효율적인 VICReg 손실 계산
-                patch_loss, patch_losses = self.vicreg_loss(
-                    curr_patch_right_half, 
-                    next_patch_left_half,
+                # 경계 영역에 대해 일관성 유지
+                border_loss, border_losses = self.vicreg_loss(
+                    current_right_border, 
+                    next_left_border,
                     sample_ratio=overlap_consistency_weight
                 )
                 
-                vicreg_total_loss += patch_loss
+                vicreg_total_loss += border_loss
                 num_pairs += 1
                 
-                # 손실 컴포넌트 누적 (평균 계산용)
-                vicreg_losses["sim_loss"] += patch_losses["sim_loss"]
-                vicreg_losses["var_loss"] += patch_losses["var_loss"]
-                vicreg_losses["cov_loss"] += patch_losses["cov_loss"]
+                # 상하 경계도 동일하게 처리 (파노라마의 위아래 연결이 있는 경우)
+                current_bottom_border = spatial_embeds[:, i, -1, :, :]  # (B, W, D)
+                next_top_border = spatial_embeds[:, next_i, 0, :, :]  # (B, W, D)
+                
+                vertical_loss, vertical_losses = self.vicreg_loss(
+                    current_bottom_border,
+                    next_top_border,
+                    sample_ratio=overlap_consistency_weight
+                )
+                
+                vicreg_total_loss += vertical_loss
+                num_pairs += 1
+                
+                # 손실 컴포넌트 누적
+                for key in vicreg_losses:
+                    vicreg_losses[key] += (border_losses[key] + vertical_losses[key]) / 2
             
             # 패치 쌍 수로 정규화
             if num_pairs > 0:
                 overlap_loss = vicreg_total_loss / num_pairs
                 
                 # 손실 컴포넌트도 정규화
-                vicreg_losses["sim_loss"] /= num_pairs
-                vicreg_losses["var_loss"] /= num_pairs
-                vicreg_losses["cov_loss"] /= num_pairs
-                
-        # (B*P, S, D) -> flatten P and S dims to (B, P*S, D)
-        # (B, P, S, D) -> (B, P, S', D) S=196 S' = 64
-        S, D = image_embeds.shape[1], image_embeds.shape[2]
-        image_embeds = image_embeds.view(B, P * S, D)
+                for key in vicreg_losses:
+                    vicreg_losses[key] /= num_pairs
+        
+        # 다음 처리를 위해 spatial_embeds를 다시 B, P*S, D 형태로 변환
+        image_embeds = spatial_embeds.view(B, P * S, D)
         
         # attention mask for P*S tokens
         image_attention_mask = torch.ones((B, P * S), dtype=torch.long, device=image_embeds.device)

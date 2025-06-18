@@ -37,19 +37,27 @@ class VICRegLoss(nn.Module):
         # 투영 적용
         return x @ proj
     
-    def forward(self, left_embeds, right_embeds, sample_ratio=1.0):
+    def forward(self, left_embeds, right_embeds, sample_ratio=1.0, spatial_aware=False):
         """
-        효율적인 VICReg 손실 계산
+        효율적인 VICReg 손실 계산 (공간 인식 지원)
         
         Args:
-            left_embeds: 좌측 이미지 특징 (B, N, D)
-            right_embeds: 우측 이미지 특징 (B, N, D)
+            left_embeds: 좌측 이미지 특징 (B, N, D) 또는 (B, H, W, D) 공간 구조
+            right_embeds: 우측 이미지 특징 (B, N, D) 또는 (B, H, W, D) 공간 구조
             sample_ratio: 계산에 사용할 특징의 비율 (0-1)
+            spatial_aware: True인 경우 특징 벡터가 2D/3D 공간 구조를 가진다고 가정
             
         Returns:
             total_loss: 전체 손실
             losses: 개별 손실 컴포넌트 (dictionary)
         """
+        # 입력 형태 확인 및 조정
+        if spatial_aware and len(left_embeds.shape) > 3:
+            # 공간 구조의 임베딩을 평탄화 (공간 위치 유지)
+            original_shape = left_embeds.shape
+            left_embeds = left_embeds.reshape(original_shape[0], -1, original_shape[-1])
+            right_embeds = right_embeds.reshape(original_shape[0], -1, right_embeds.shape[-1])
+        
         # 1. 선택적 샘플링으로 계산량 감소
         if sample_ratio < 1.0:
             N = left_embeds.size(1)
