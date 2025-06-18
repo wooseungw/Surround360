@@ -2213,11 +2213,10 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         ```"""
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         # 디버깅을 위한 초기 입력값 정보 출력
-        print("="*50)
-        print("SurroundBlip forward 호출 시작")
+        
         # step 0: remove patch dimensions from pixel_values
         B, P, C, H, W = pixel_values.shape
-        print(f"입력 이미지 크기: [B={B}, P={P}, C={C}, H={H}, W={W}]")
+        
         pixel_values = pixel_values.view(B * P, C, H, W)
         
         # step 1: forward the images through the vision encoder,
