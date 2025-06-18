@@ -2226,29 +2226,63 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
             return_dict=return_dict,
             interpolate_pos_encoding=interpolate_pos_encoding,
         )
-        _ , S, D = vision_outputs[0].shape
+        BP, S, D = vision_outputs[0].shape
         image_embeds = vision_outputs[0]
         # 원본 (B*P, S, D) 형태의 image_embeds를 유지
         original_image_embeds = vision_outputs[0]  # (B*P, S, D)
         
-        # 패치 토큰을 2D 공간 구조로 재구성 (B,P,H,W,D)
-        # S=196인 경우 기본 ViT 패치는 14x14 그리드
-        H = int(S ** 0.5)  # 예: 196 -> 14
-        W = H
+        # 디버깅 정보 출력 (실제 텐서 크기 확인)
+        actual_size = original_image_embeds.numel()
+        print(f"Debug - Tensor shapes: B={B}, P={P}, S={S}, D={D}, BP={BP}")
+        print(f"Debug - Tensor actual size: {actual_size}, should match: {B*P*S*D}")
         
-        if H*W != S:
-            # 완전한 제곱수가 아니라면 직접 지정 필요
-            H, W = 14, 14  # 혹은 다른 적절한 값으로 설정
+        # S가 완전한 제곱수인지 확인
+        H = int(S ** 0.5)
+        if H*H == S:
+            W = H
+        else:
+            # 완전한 제곱수가 아니면 실제 형태 계산
+            # 예를 들어, ViT-L/14에서는 패치가 16x16 또는 다른 크기일 수 있음
+            if S == 257:  # ViT CLS 토큰이 있는 경우 (256 + 1)
+                H, W = 16, 16  # 첫 번째 토큰을 CLS 토큰으로 가정
+                # CLS 토큰 제외하고 공간 구조로 재구성
+                spatial_embeds = original_image_embeds[:, 1:, :].view(B, P, H, W, D)
+                return
+            else:
+                # 가장 가까운 제곱근으로 H를 설정하고 나머지를 W에 할당
+                H = int(S ** 0.5)
+                W = S // H
+                if H*W != S:
+                    # 그래도 맞지 않으면 특정 모델에 맞는 값 수동 설정
+                    print(f"Warning: Cannot reshape {S} into perfect H*W, manually setting H=14, W=14")
+                    H, W = 14, 14
 
-        # 2D 공간 구조로 재구성 (B,P,H,W,D)
-        spatial_embeds = original_image_embeds.view(B, P, H, W, D)
+        # 텐서 재구성 시도
+        try:
+            # 2D 공간 구조로 재구성 (B,P,H,W,D)
+            spatial_embeds = original_image_embeds.view(B, P, H, W, D)
+            print(f"Successfully reshaped to ({B}, {P}, {H}, {W}, {D})")
+        except RuntimeError as e:
+            print(f"Error reshaping tensor: {e}")
+            # 백업 방법: reshape 불가능하면 학습 계속 진행
+            H = 14
+            W = 14
+            # 텐서 크기 맞추기
+            required_size = B * P * H * W * D
+            if original_image_embeds.numel() > required_size:
+                # 필요한 크기에 맞게 잘라내기
+                cut_S = H * W
+                spatial_embeds = original_image_embeds[:, :cut_S, :].view(B, P, H, W, D)
+            else:
+                # 기본 1D 형태로 유지 (VICReg 손실 계산을 건너뛰게 됨)
+                spatial_embeds = None
         
         # VICReg 손실 계산 부분 수정 - 2D 공간 관계 활용
         overlap_loss = 0.0
         vicreg_losses = {"sim_loss": 0.0, "var_loss": 0.0, "cov_loss": 0.0}
         
         # 2D 공간에서 인접 관계 계산
-        if P > 1:  # 여러 패치가 있을 때만 계산
+        if P > 1 and spatial_embeds is not None:  # 여러 패치가 있고 공간 구조가 성공적으로 생성된 경우
             vicreg_total_loss = 0.0
             num_pairs = 0
             
@@ -2384,10 +2418,10 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
             loss = outputs.loss
             logits = outputs.logits
             outputs = outputs.to_tuple() if not return_dict else outputs
-            # 기존 손실에 오버랩 일관성 손실 추가
-            if loss is not None:
+            # 기존 손실에 오버랩 일관성 손실 추가 (만약 계산되었다면)
+            if loss is not None and spatial_embeds is not None:
                 loss = loss + overlap_consistency_weight * overlap_loss
-            else:
+            elif spatial_embeds is not None:
                 loss = overlap_consistency_weight * overlap_loss
         if not return_dict:
             output = (logits, vision_outputs, query_outputs, outputs)
