@@ -2236,6 +2236,11 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         print(f"Debug - Tensor shapes: B={B}, P={P}, S={S}, D={D}, BP={BP}")
         print(f"Debug - Tensor actual size: {actual_size}, should match: {B*P*S*D}")
         
+        # 모델 아키텍처에 따라 다를 수 있는 S(시퀀스 길이) 처리
+        # ViT-B/16: S=196 (14x14 패치)
+        # ViT-L/16: S=256 (16x16 패치) 
+        # ViT 모델들은 종종 CLS 토큰을 추가하여 S+1 형태가 됨 (예: 196+1=197 또는 256+1=257)
+        
         # S가 완전한 제곱수인지 확인
         H = int(S ** 0.5)
         if H*H == S:
@@ -2244,10 +2249,10 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
             # 완전한 제곱수가 아니면 실제 형태 계산
             # 예를 들어, ViT-L/14에서는 패치가 16x16 또는 다른 크기일 수 있음
             if S == 257:  # ViT CLS 토큰이 있는 경우 (256 + 1)
-                H, W = 16, 16  # 첫 번째 토큰을 CLS 토큰으로 가정
-                # CLS 토큰 제외하고 공간 구조로 재구성
+                H, W = 16, 16  # 첫 번째 토큰을 CLS 토큰으로 가정 (16x16=256 패치 + 1 CLS 토큰)
+                # CLS 토큰 제외하고 공간 구조로 재구성 ([:, 1:, :] = 첫 번째 CLS 토큰 제외)
                 spatial_embeds = original_image_embeds[:, 1:, :].view(B, P, H, W, D)
-                return
+                print(f"ViT with CLS token: Reshaped S=257 tensor to ({B}, {P}, {H}, {W}, {D})")
             else:
                 # 가장 가까운 제곱근으로 H를 설정하고 나머지를 W에 할당
                 H = int(S ** 0.5)
@@ -2332,11 +2337,26 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
                 for key in vicreg_losses:
                     vicreg_losses[key] /= num_pairs
         
-        # 다음 처리를 위해 spatial_embeds를 다시 B, P*S, D 형태로 변환
-        image_embeds = spatial_embeds.view(B, P * S, D)
-        
-        # attention mask for P*S tokens
-        image_attention_mask = torch.ones((B, P * S), dtype=torch.long, device=image_embeds.device)
+        # 다음 처리를 위해 spatial_embeds를 다시 적절한 형태로 변환
+        if spatial_embeds is not None:
+            # 정상적으로 공간 임베딩이 생성된 경우
+            if S == 257:
+                # CLS 토큰이 있는 경우 처리 - CLS 토큰이 제거된 상태이므로 256개만 있음
+                H, W = 16, 16  # 16x16=256 패치
+                # 원래 CLS 토큰을 포함한 벡터로 계속 진행
+                image_embeds = original_image_embeds
+                S_actual = S  # CLS 토큰 포함하여 사용
+            else:
+                # 일반 케이스: 2D 공간 형태에서 다시 변환
+                image_embeds = spatial_embeds.view(B, P * H * W, D)
+                S_actual = H * W  # 실제 사용되는 시퀀스 길이
+        else:
+            # 공간 임베딩 생성 실패 시 원본 사용
+            image_embeds = original_image_embeds
+            S_actual = S
+            
+        # attention mask for tokens
+        image_attention_mask = torch.ones((B, image_embeds.size(1)), dtype=torch.long, device=image_embeds.device)
         
         query_tokens = self.query_tokens.expand(image_embeds.shape[0], -1, -1)
         # print("query_tokens", query_tokens.shape)
@@ -2419,10 +2439,21 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
             logits = outputs.logits
             outputs = outputs.to_tuple() if not return_dict else outputs
             # 기존 손실에 오버랩 일관성 손실 추가 (만약 계산되었다면)
-            if loss is not None and spatial_embeds is not None:
+            if loss is not None and spatial_embeds is not None and P > 1:
+                # 패치가 여러 개이고 공간 임베딩이 계산된 경우에만 일관성 손실 추가
+                print(f"Adding overlap consistency loss (weight={overlap_consistency_weight:.3f}, value={overlap_loss:.6f})")
                 loss = loss + overlap_consistency_weight * overlap_loss
-            elif spatial_embeds is not None:
+            elif spatial_embeds is not None and P > 1:
+                # 언어 모델 손실이 없는 경우 일관성 손실만 사용
                 loss = overlap_consistency_weight * overlap_loss
+                
+        # 손실이 여전히 None이면 기본값 설정 (훈련에 문제가 없도록)
+        if loss is None:
+            # 학습 시 손실 계산에 문제가 있는 경우 기본값으로 0 손실 반환
+            # 이는 디버깅 목적이며, 실제 학습에서는 유의미한 손실이 계산되어야 함
+            print("Warning: Loss is None. Using dummy loss=0.0 to continue training.")
+            loss = torch.tensor(0.0, device=inputs_embeds.device)
+                
         if not return_dict:
             output = (logits, vision_outputs, query_outputs, outputs)
             return ((loss,) + output) if loss is not None else output
