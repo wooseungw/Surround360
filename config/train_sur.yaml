@@ -19,7 +19,7 @@ data:
     train_file: "train.csv"
     valid_file: "valid.csv"
     image_size: [ 224, 224 ]
-    max_length: 50
+    max_length: 128
     do_crop: true
     fov: 90 # FOV 설정
     overlap_ratio: 0.5
@@ -36,9 +36,9 @@ training:
     run_name: "surround_360"
     num_epochs: 10
     batch_size:
-        train: 8
+        train: 16
         eval: 16
-    gradient_accumulation_steps: 2 # 효과적인 배치 크기 16
+    gradient_accumulation_steps: 1 # 효과적인 배치 크기 16
     dataloader_num_workers: 8 # CPU 병렬 처리 추가
     gradient_checkpointing: true # 메모리 최적화
 
