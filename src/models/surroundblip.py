@@ -2234,11 +2234,6 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         # 원본 (B*P, S, D) 형태의 image_embeds를 유지
         original_image_embeds = vision_outputs[0]  # (B*P, S, D)
         
-        # 디버깅 정보 출력 (실제 텐서 크기 확인)
-        actual_size = original_image_embeds.numel()
-        print(f"Debug - Tensor shapes: B={B}, P={P}, S={S}, D={D}, BP={BP}")
-        print(f"Debug - Tensor actual size: {actual_size}, should match: {B*P*S*D}")
-        
         # 모델 아키텍처에 따라 다를 수 있는 S(시퀀스 길이) 처리
         # ViT-B/16: S=196 (14x14 패치)
         # ViT-L/16: S=256 (16x16 패치) 
@@ -2255,23 +2250,21 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
                 H, W = 16, 16  # 첫 번째 토큰을 CLS 토큰으로 가정 (16x16=256 패치 + 1 CLS 토큰)
                 # CLS 토큰 제외하고 공간 구조로 재구성 ([:, 1:, :] = 첫 번째 CLS 토큰 제외)
                 spatial_embeds = original_image_embeds[:, 1:, :].view(B, P, H, W, D)
-                print(f"ViT with CLS token: Reshaped S=257 tensor to ({B}, {P}, {H}, {W}, {D})")
+                
             else:
                 # 가장 가까운 제곱근으로 H를 설정하고 나머지를 W에 할당
                 H = int(S ** 0.5)
                 W = S // H
                 if H*W != S:
                     # 그래도 맞지 않으면 특정 모델에 맞는 값 수동 설정
-                    print(f"Warning: Cannot reshape {S} into perfect H*W, manually setting H=14, W=14")
                     H, W = 14, 14
 
         # 텐서 재구성 시도
         try:
             # 2D 공간 구조로 재구성 (B,P,H,W,D)
             spatial_embeds = original_image_embeds.view(B, P, H, W, D)
-            print(f"Successfully reshaped to ({B}, {P}, {H}, {W}, {D})")
+            
         except RuntimeError as e:
-            print(f"Error reshaping tensor: {e}")
             # 백업 방법: reshape 불가능하면 학습 계속 진행
             H = 14
             W = 14
