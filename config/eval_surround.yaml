@@ -1,6 +1,6 @@
 model:
     name: surround
-    pretrain_path: "saved_models/surround_360_add_vicloss" # HuggingFace 형식으로 저장된 경로
+    pretrain_path: "saved_models/surround_360_concatqformer" # HuggingFace 형식으로 저장된 경로
 data:
     dir: "data/quic360"
     test_file: "test.csv" # CSV: url,query,annotation
@@ -17,4 +17,4 @@ generate:
     num_beams: 4
 device: "cuda"
 output:
-    result_file: "outputs/surround_360_add_vicloss_eval_results_long.json"
+    result_file: "outputs/surround_360_concatqformer.json"
