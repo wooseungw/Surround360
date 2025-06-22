@@ -2358,8 +2358,9 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
             return_dict=return_dict,
         )
         query_output = query_outputs[0]
-        print("query_output shape:", query_output.shape)  # (B*P, S, D) 형태로 출력
-        # query_output = query_output.reshape(B, P * S, D)  # (B*P, S, D) 형태로 재구성
+        
+        query_output = query_output.reshape(B, P * S, D)  # (B*P, S, D) 형태로 재구성
+        print(f"query_output shape after reshape: {query_output.shape}")  # 디버깅용 출력
         # Qformer is kept in fp32, we downcast the output back if needed
         if query_output.dtype != image_embeds.dtype:
             query_output = query_output.to(image_embeds.dtype)
