@@ -2336,10 +2336,10 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         # Q-Former로 전달하기 전에 (B, P*S, D) 형태로 변환해야 합니다.
         # 이렇게 해야 배치 크기가 B로 유지되며 어텐션 마스크와 일관성이 유지됩니다.
         image_embeds = original_image_embeds.reshape(B, P, S, D)  # 먼저 (B, P, S, D)로 변환
-        image_embeds = image_embeds.reshape(B, P * S, D)          # 그런 다음 (B, P*S, D)로 변환
+        image_embeds = image_embeds.reshape(B * P, S, D)          # 그런 다음 (B, P*S, D)로 변환
         
         # 어텐션 마스크 생성 - 배치 크기 B를 유지하고, 시퀀스 길이는 P*S
-        image_attention_mask = torch.ones((B, P * S), dtype=torch.long, device=image_embeds.device)
+        image_attention_mask = torch.ones((B * P, S), dtype=torch.long, device=image_embeds.device)
         
         query_tokens = self.query_tokens.expand(image_embeds.shape[0], -1, -1)
         
@@ -2358,7 +2358,8 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
             return_dict=return_dict,
         )
         query_output = query_outputs[0]
-        
+        query_output = query_output.reshape(B, P , S, D)  # (B, P, S, D) 형태로 재구성
+        query_output = query_output.reshape(B, P * S, D)  # (B*P, S, D) 형태로 재구성
         # Qformer is kept in fp32, we downcast the output back if needed
         if query_output.dtype != image_embeds.dtype:
             query_output = query_output.to(image_embeds.dtype)
