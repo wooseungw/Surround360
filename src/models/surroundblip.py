@@ -2483,186 +2483,64 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
             # preprocess for `accelerate`
             self._preprocess_accelerate()
 
-        # Flatten patch dimension like in forward
         # step 0: remove patch dimensions from pixel_values
         B, P, C, H, W = pixel_values.shape
-        
         pixel_values = pixel_values.view(B * P, C, H, W)
         
-        # step 1: forward the images through the vision encoder,
-        # to get image embeddings of shape (batch_size, seq_len, hidden_size)
+        # step 1: forward the images through the vision encoder
+        batch_size = B
         vision_outputs = self.vision_model(
-            pixel_values=pixel_values,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
+            pixel_values,
+            return_dict=True,
             interpolate_pos_encoding=interpolate_pos_encoding,
         )
-        BP, S, D = vision_outputs[0].shape
-        image_embeds = vision_outputs[0]
+        image_embeds = vision_outputs.last_hidden_state  # (B*P, S, D)
         # 원본 (B*P, S, D) 형태의 image_embeds를 유지
-        original_image_embeds = vision_outputs[0]  # (B*P, S, D)
+        original_image_embeds = vision_outputs.last_hidden_state  # (B*P, S, D)
         
-        # 모델 아키텍처에 따라 다를 수 있는 S(시퀀스 길이) 처리
-        # ViT-B/16: S=196 (14x14 패치)
-        # ViT-L/16: S=256 (16x16 패치) 
-        # ViT 모델들은 종종 CLS 토큰을 추가하여 S+1 형태가 됨 (예: 196+1=197 또는 256+1=257)
-        
-        # S가 완전한 제곱수인지 확인
-        H = int(S ** 0.5)
-        if H*H == S:
-            W = H
-        else:
-            # 완전한 제곱수가 아니면 실제 형태 계산
-            # 예를 들어, ViT-L/14에서는 패치가 16x16 또는 다른 크기일 수 있음
-            if S == 257:  # ViT CLS 토큰이 있는 경우 (256 + 1)
-                H, W = 16, 16  # 첫 번째 토큰을 CLS 토큰으로 가정 (16x16=256 패치 + 1 CLS 토큰)
-                # CLS 토큰 제외하고 공간 구조로 재구성 ([:, 1:, :] = 첫 번째 CLS 토큰 제외)
-                spatial_embeds = original_image_embeds[:, 1:, :].view(B, P, H, W, D)
-                
-            else:
-                # 가장 가까운 제곱근으로 H를 설정하고 나머지를 W에 할당
-                H = int(S ** 0.5)
-                W = S // H
-                if H*W != S:
-                    # 그래도 맞지 않으면 특정 모델에 맞는 값 수동 설정
-                    H, W = 14, 14
-
-        # 텐서 재구성 시도
-        try:
-            # 2D 공간 구조로 재구성 (B,P,H,W,D)
-            spatial_embeds = original_image_embeds.view(B, P, H, W, D)
-            
-        except RuntimeError as e:
-            # 백업 방법: reshape 불가능하면 학습 계속 진행
-            H = 14
-            W = 14
-            # 텐서 크기 맞추기
-            required_size = B * P * H * W * D
-            if original_image_embeds.numel() > required_size:
-                # 필요한 크기에 맞게 잘라내기
-                cut_S = H * W
-                spatial_embeds = original_image_embeds[:, :cut_S, :].view(B, P, H, W, D)
-            else:
-                # 기본 1D 형태로 유지 (VICReg 손실 계산을 건너뛰게 됨)
-                spatial_embeds = None
-        
-        # VICReg 손실 계산 부분 수정 - 2D 공간 관계 활용
-        overlap_loss = 0.0
-        vicreg_losses = {"sim_loss": 0.0, "var_loss": 0.0, "cov_loss": 0.0}
-        
-        # 2D 공간에서 인접 관계 계산
-        if P > 1 and spatial_embeds is not None:  # 여러 패치가 있고 공간 구조가 성공적으로 생성된 경우
-            vicreg_total_loss = 0.0
-            num_pairs = 0
-            
-            # 인접 패치 쌍 찾기 (예: 파노라마인 경우 왼쪽-오른쪽 경계)
-            # 여기서는 간단한 원형 연결을 가정함
-            for i in range(P):
-                next_i = (i + 1) % P  # 원형 구조를 위한 모듈로 연산
-                
-                # 현재 패치의 오른쪽 경계와 다음 패치의 왼쪽 경계
-                # 2D 구조에서 W 방향 경계에서 추출
-                current_right_border = spatial_embeds[:, i, :, -1, :]  # (B, H, D)
-                next_left_border = spatial_embeds[:, next_i, :, 0, :]  # (B, H, D)
-                
-                # 메모리 효율적인 VICReg 손실 계산
-                # 경계 영역에 대해 일관성 유지
-                border_loss, border_losses = self.vicreg_loss(
-                    current_right_border, 
-                    next_left_border,
-                    sample_ratio=overlap_consistency_weight
-                )
-                
-                vicreg_total_loss += border_loss
-                num_pairs += 1
-                
-                # 상하 경계도 동일하게 처리 (파노라마의 위아래 연결이 있는 경우)
-                current_bottom_border = spatial_embeds[:, i, -1, :, :]  # (B, W, D)
-                next_top_border = spatial_embeds[:, next_i, 0, :, :]  # (B, W, D)
-                
-                vertical_loss, vertical_losses = self.vicreg_loss(
-                    current_bottom_border,
-                    next_top_border,
-                    sample_ratio=overlap_consistency_weight
-                )
-                
-                vicreg_total_loss += vertical_loss
-                num_pairs += 1
-                
-                # 손실 컴포넌트 누적
-                for key in vicreg_losses:
-                    vicreg_losses[key] += (border_losses[key] + vertical_losses[key]) / 2
-            
-            # 패치 쌍 수로 정규화
-            if num_pairs > 0:
-                overlap_loss = vicreg_total_loss / num_pairs
-                
-                # 손실 컴포넌트도 정규화
-                for key in vicreg_losses:
-                    vicreg_losses[key] /= num_pairs
+        S, D = image_embeds.shape[1], image_embeds.shape[2]
         
         # 원본 이미지 임베딩은 (B*P, S, D) 형태입니다.
-        # Q-Former로 전달하기 전에 (B, P*S, D) 형태로 변환해야 합니다.
-        # 이렇게 해야 배치 크기가 B로 유지되며 어텐션 마스크와 일관성이 유지됩니다.
+        # Q-Former로 전달하기 전에 동일한 형태로 처리합니다.
         image_embeds = original_image_embeds.reshape(B, P, S, D)  # 먼저 (B, P, S, D)로 변환
-        image_embeds = image_embeds.reshape(B * P, S, D)          # 그런 다음 (B, P*S, D)로 변환
+        image_embeds = image_embeds.reshape(B * P, S, D)          # 그런 다음 (B*P, S, D)로 변환
         
-        # 어텐션 마스크 생성 - 배치 크기 B를 유지하고, 시퀀스 길이는 P*S
+        # 어텐션 마스크 생성 - forward와 일관되게 (B * P, S) 형태로 생성
         image_attention_mask = torch.ones((B * P, S), dtype=torch.long, device=image_embeds.device)
         
         query_tokens = self.query_tokens.expand(image_embeds.shape[0], -1, -1)
         
-        # 배치 차원이 일치하는지 확인
+        # 배치 차원이 일치하는지 확인 (forward와 동일)
         assert query_tokens.shape[0] == image_embeds.shape[0], "배치 차원이 일치하지 않습니다"
         assert query_tokens.shape[0] == image_attention_mask.shape[0], "쿼리 토큰과 어텐션 마스크의 배치 차원이 일치하지 않습니다"
         assert image_embeds.shape[0] == image_attention_mask.shape[0], "이미지 임베딩과 어텐션 마스크의 배치 차원이 일치하지 않습니다"
         assert image_embeds.shape[1] == image_attention_mask.shape[1], "이미지 임베딩과 어텐션 마스크의 시퀀스 길이가 일치하지 않습니다"
-        
         query_outputs = self.qformer(
             query_embeds=query_tokens,
             encoder_hidden_states=image_embeds,
             encoder_attention_mask=image_attention_mask,
+            return_dict=True,
         )
-        query_output = query_outputs[0]
+        query_output = query_outputs.last_hidden_state
         
+        # forward와 동일하게 query_output 처리
         query_output = query_output.view(B, P * self.config.num_query_tokens, -1)
+
         # Qformer is kept in fp32, we downcast the output back if needed
         if query_output.dtype != image_embeds.dtype:
             query_output = query_output.to(image_embeds.dtype)
 
-        # step 3: use the language model, conditioned on the query outputs and the prompt
         language_model_inputs = self.language_projection(query_output)
-        language_model_attention_mask = torch.ones(
+        language_attention_mask = torch.ones(
             language_model_inputs.size()[:-1], dtype=torch.long, device=language_model_inputs.device
         )
-        inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
-        if attention_mask is None:
-            attention_mask = torch.ones_like(input_ids)
-
-        # if the model already has "image_token_index" then the input is expanded to account for image embeds
-        # otherwise we expand manually by concating
-        if getattr(self.config, "image_token_index", None) is not None:
-            special_image_mask = (input_ids == self.config.image_token_index).unsqueeze(-1).expand_as(inputs_embeds)
-            language_model_inputs = language_model_inputs.to(inputs_embeds.device, inputs_embeds.dtype)
-            inputs_embeds = inputs_embeds.masked_scatter(special_image_mask, language_model_inputs)
-        else:
-            logger.warning_once(
-                "Expanding inputs for image tokens in BLIP-2 should be done in processing. "
-                "Please follow instruction here (https://gist.github.com/zucchini-nlp/e9f20b054fa322f84ac9311d9ab67042) to update your BLIP-2 model. "
-                "Using processors without these attributes in the config is deprecated and will throw an error in v4.50."
-            )
-            inputs_embeds = torch.cat([language_model_inputs, inputs_embeds.to(language_model_inputs.device)], dim=1)
-            attention_mask = torch.cat(
-                [language_model_attention_mask, attention_mask.to(language_model_attention_mask.device)], dim=1
-            )
 
         if input_ids is None:
             start_tokens = [self.config.text_config.bos_token_id]
             if getattr(self.config, "image_token_index", None) is not None:
                 start_tokens = [self.config.image_token_index] * self.config.num_query_tokens + start_tokens
             input_ids = torch.tensor([start_tokens], dtype=torch.long, device=image_embeds.device)
-            input_ids = input_ids.repeat(B, 1)
+            input_ids = input_ids.repeat(batch_size, 1)
 
         inputs_embeds = self.get_input_embeddings()(input_ids)
         if attention_mask is None:
@@ -2672,7 +2550,8 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         # otherwise we expand manually by concatenating
         if getattr(self.config, "image_token_index", None) is not None:
             special_image_mask = (input_ids == self.config.image_token_index).unsqueeze(-1).expand_as(inputs_embeds)
-            inputs_embeds[special_image_mask] = language_model_inputs.flatten()
+            language_model_inputs = language_model_inputs.to(inputs_embeds.device, inputs_embeds.dtype)
+            inputs_embeds = inputs_embeds.masked_scatter(special_image_mask, language_model_inputs)
         else:
             logger.warning_once(
                 "Expanding inputs for image tokens in BLIP-2 should be done in processing. "

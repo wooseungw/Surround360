@@ -8,7 +8,7 @@ model:
     name: "blip2"
     pretrain_name: "Salesforce/blip2-opt-2.7b" # HuggingFace 형식으로 저장된 경로
     save_dir: "saved_models/blip2_360"
-    max_new_tokens: 256 # 최대 생성 토큰 수
+    max_new_tokens: 32 # 최대 생성 토큰 수
 
 # 데이터 설정
 data:
@@ -16,7 +16,7 @@ data:
     train_file: "train.csv"
     valid_file: "valid.csv"
     image_size: [ 224, 224 ]
-    max_length: 256
+    max_length: 32
     do_crop: false
     overlap_ratio: 0.5
 
