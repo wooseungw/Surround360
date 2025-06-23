@@ -34,7 +34,7 @@ training:
     train_itm: true # 훈련 ITM (Image-Text Matching) 여부
     output_dir: "outputs/surround_360_add_vicloss3"
     run_name: "surround_360"
-    num_epochs: 10
+    num_epochs: 8
     batch_size:
         train: 16
         eval: 16
