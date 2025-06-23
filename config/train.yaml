@@ -7,7 +7,7 @@ wandb:
 model:
     name: "surround"
     pretrain_name: "Salesforce/blip2-opt-2.7b" # HuggingFace 형식으로 저장된 경로
-    save_dir: "saved_models/concatqformer"
+    save_dir: "saved_models/surround_360_add_vicloss3"
     max_new_tokens: 32 # 최대 생성 토큰 수
     num_query_tokens: 32 # Q-Former의 쿼리 토큰 수 original: 32
     qformer:
@@ -19,7 +19,7 @@ data:
     train_file: "train.csv"
     valid_file: "valid.csv"
     image_size: [ 224, 224 ]
-    max_length: 32
+    max_length: 64
     do_crop: true
     fov: 90 # FOV 설정
     overlap_ratio: 0.5
