@@ -1,14 +1,17 @@
 # wandb 설정
 wandb:
     project: "Surround360"
-    name: "blip2_360_training"
+    name: "concatqformer"
 
 # 모델 설정
 model:
-    name: "blip2"
+    name: "surround"
     pretrain_name: "Salesforce/blip2-opt-2.7b" # HuggingFace 형식으로 저장된 경로
-    save_dir: "saved_models/blip2_360"
+    save_dir: "saved_models/concatqformer"
     max_new_tokens: 32 # 최대 생성 토큰 수
+    num_query_tokens: 32 # Q-Former의 쿼리 토큰 수 original: 32
+    qformer:
+        hidden_size: 768 # 원하는 Q-Former 레이어 수로 변경 original: 768
 
 # 데이터 설정
 data:
@@ -17,7 +20,8 @@ data:
     valid_file: "valid.csv"
     image_size: [ 224, 224 ]
     max_length: 32
-    do_crop: false
+    do_crop: true
+    fov: 90 # FOV 설정
     overlap_ratio: 0.5
 
 # deepspeed 설정
@@ -27,14 +31,15 @@ deepspeed:
 
 # 학습 설정
 training:
-    output_dir: "outputs/blip2_360"
-    run_name: "blip2_360_baseline"
-    num_epochs: 50
+    train_itm: true # 훈련 ITM (Image-Text Matching) 여부
+    output_dir: "outputs/surround_360_add_vicloss3"
+    run_name: "surround_360"
+    num_epochs: 10
     batch_size:
-        train: 64
-        eval: 256
+        train: 16
+        eval: 16
     gradient_accumulation_steps: 1 # 효과적인 배치 크기 16
-    dataloader_num_workers: 16 # CPU 병렬 처리 추가
+    dataloader_num_workers: 8 # CPU 병렬 처리 추가
     gradient_checkpointing: true # 메모리 최적화
 
     # 학습률 및 최적화
@@ -46,9 +51,9 @@ training:
     logging_dir: "logs/blip2_360"
     logging_steps: 4 # 더 자주 로깅
     eval_strategy: "steps" # step 기반으로 변경
-    eval_steps: 50 # 500 step마다 평가
+    eval_steps: 100 # 500 step마다 평가
     save_strategy: "steps" # step 기반 저장
-    save_steps: 50
+    save_steps: 100
     save_total_limit: 3 # 최대 3개 체크포인트 유지
     load_best_model_at_end: true
     metric_for_best_model: "eval_loss" # 최상의 모델 기준
