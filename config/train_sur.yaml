@@ -1,7 +1,7 @@
 # wandb 설정
 wandb:
     project: "Surround360"
-    name: "surround_360_concatqformer"
+    name: "concatqformer"
 
 # 모델 설정
 model:
