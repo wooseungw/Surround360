@@ -2027,7 +2027,7 @@ class Blip2VisionModelWithProjection(Blip2PreTrainedModel):
     BLIP_2_START_DOCSTRING,
 )
 class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
-    """Refactored SurroundBlip with shared vision‑language encoding and MultiModalITLoss."""
+    """Refactored SurroundBlip with shared vision-language encoding and MultiModalITLoss."""
 
     config_class = Blip2Config
     main_input_name = "pixel_values"
@@ -2053,8 +2053,8 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
             else AutoModelForSeq2SeqLM.from_config(config.text_config)
         )
 
-        # Loss
-        self.mm_loss = MultiModalITLoss(vocab_size=config.text_config.vocab_size)
+        # Loss module uses Q‑Former hidden dim
+        self.mm_loss = MultiModalITLoss(config.qformer_config.hidden_size)
 
         # weight tying quirks
         if self.language_model._tied_weights_keys is not None:
@@ -2063,37 +2063,37 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         self.post_init()
 
     # ------------------------------------------------------------
-    # SHARED ENCODING LOGIC – used by both forward & generate
+    # SHARED ENCODING LOGIC – forward & generate reuse
     # ------------------------------------------------------------
     def _encode_image(self, pixel_values: torch.FloatTensor, interpolate_pos_encoding: bool = False):
-        """Return query_output, image_embeds, masks, and intermediate outputs."""
+        """Return proj_q (B, P*Q, Dq), mask, pooled_img (B, Dq), and vision_out."""
         B, P, C, H, W = pixel_values.shape
         flat_pixels = pixel_values.view(B * P, C, H, W)
 
-        vision_out = self.vision_model(
-            flat_pixels, return_dict=True, interpolate_pos_encoding=interpolate_pos_encoding
-        )
-        img_embeds = vision_out.last_hidden_state  # (BP, S, D)
+        # Vision encoder
+        vision_out = self.vision_model(flat_pixels, return_dict=True, interpolate_pos_encoding=interpolate_pos_encoding)
+        img_embeds = vision_out.last_hidden_state  # (BP, Sv, Dv)
+        Sv, Dv = img_embeds.shape[1:]
 
         # Q‑Former
-        S, D = img_embeds.shape[1], img_embeds.shape[2]
-        img_attention = torch.ones((B * P, S), dtype=torch.long, device=img_embeds.device)
-        q_tokens = self.query_tokens.expand(B * P, -1, -1)
+        img_attn = torch.ones((B * P, Sv), dtype=torch.long, device=img_embeds.device)
+        q_tokens = self.query_tokens.expand(B * P, -1, -1)  # (BP, Q, Dq)
         q_out = self.qformer(
             query_embeds=q_tokens,
             encoder_hidden_states=img_embeds,
-            encoder_attention_mask=img_attention,
+            encoder_attention_mask=img_attn,
             return_dict=True,
-        ).last_hidden_state  # (BP, Q, D)
+        ).last_hidden_state                     # (BP, Q, Dq)
 
-        # merge patches dimension back (B, P*Q, D)
-        q_out = q_out.view(B, P * self.config.num_query_tokens, D)
-        proj_q = self.language_projection(q_out)
+        Dq = q_out.shape[-1]
+        q_out = q_out.view(B, P * self.config.num_query_tokens, Dq)  # (B, P*Q, Dq)
+        proj_q = self.language_projection(q_out)                     # (B, P*Q, Dt)
         lang_mask = torch.ones(proj_q.shape[:2], dtype=torch.long, device=proj_q.device)
-        return proj_q, lang_mask, q_out.mean(1), vision_out  # mean pooled feat for IT losses
+        pooled_img = q_out.mean(1)                                   # (B, Dq) for IT losses
+        return proj_q, lang_mask, pooled_img, vision_out
 
     # ------------------------------------------------------------
-    # BASIC LANGUAGE MODEL HELPERS
+    # LM helpers
     # ------------------------------------------------------------
     def get_input_embeddings(self):
         return self.language_model.get_input_embeddings()
@@ -2112,22 +2112,22 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         labels: Optional[torch.LongTensor] = None,
         interpolate_pos_encoding: bool = False,
         **unused,
-    ) -> Union[Tuple, Blip2ForConditionalGenerationModelOutput]:
+    ) -> Union[Tuple, "Blip2ForConditionalGenerationModelOutput"]:
         return_dict = self.config.use_return_dict
 
-        # shared encode
-        proj_q, lang_mask, pooled_img, vision_out = self._encode_image(
-            pixel_values, interpolate_pos_encoding=interpolate_pos_encoding
-        )
+        # Encode image → query tokens for LM
+        proj_q, lang_mask, pooled_img, vision_out = self._encode_image(pixel_values, interpolate_pos_encoding)
 
-        # prepend / replace image tokens into LM input
+        # Text embeds
         txt_embeds = self.get_input_embeddings()(input_ids)
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids)
+
+        # Concatenate image tokens + text tokens
         inputs_embeds = torch.cat([proj_q, txt_embeds], dim=1)
         attention_mask = torch.cat([lang_mask, attention_mask], dim=1)
 
-        # LM forward
+        # LM forward (encoder‑decoder or decoder‑only are handled internally)
         outputs = self.language_model(
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
@@ -2135,20 +2135,21 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
             return_dict=True,
         )
         lm_logits = outputs.logits
-        pooled_txt = proj_q.mean(1)  # surrogate text feat for ITC/ITM
 
-        # compute multimodal loss
+        # pooled text feature (mean of proj_q) – simple surrogate
+        pooled_txt = proj_q.mean(1).detach()  # (B, Dq)
+
+        # multimodal loss
         mm_loss, loss_dict = self.mm_loss(pooled_img, pooled_txt, lm_logits, labels)
 
         if not return_dict:
-            return (mm_loss, lm_logits)
+            return (mm_loss, lm_logits, loss_dict)
 
-        return Blip2ForConditionalGenerationModelOutput(
+        from transformers.modeling_outputs import Seq2SeqLMOutput
+        return Seq2SeqLMOutput(  # minimal output struct compatible with Trainer
             loss=mm_loss,
             logits=lm_logits,
-            vision_outputs=vision_out,
-            qformer_outputs=None,
-            language_model_outputs=outputs,
+            encoder_last_hidden_state=vision_out.last_hidden_state,
         )
 
     # ------------------------------------------------------------
@@ -2163,17 +2164,19 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         interpolate_pos_encoding: bool = False,
         **gen_kwargs,
     ) -> torch.LongTensor:
-        self._preprocess_accelerate() if hasattr(self, "hf_device_map") else None
-        proj_q, lang_mask, _pooled, _ = self._encode_image(pixel_values, interpolate_pos_encoding)
+        if hasattr(self, "hf_device_map"):
+            self._preprocess_accelerate()
 
-        # build prompt embeds
+        proj_q, lang_mask, _pooled_img, _ = self._encode_image(pixel_values, interpolate_pos_encoding)
+
         if input_ids is None:
             bos = torch.tensor([[self.config.text_config.bos_token_id]], device=pixel_values.device)
             input_ids = bos.repeat(pixel_values.size(0), 1)
-        txt_embeds = self.get_input_embeddings()(input_ids)
-        inputs_embeds = torch.cat([proj_q, txt_embeds], dim=1)
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids)
+
+        txt_embeds = self.get_input_embeddings()(input_ids)
+        inputs_embeds = torch.cat([proj_q, txt_embeds], dim=1)
         attention_mask = torch.cat([lang_mask, attention_mask], dim=1)
 
         return self.language_model.generate(
@@ -2181,10 +2184,6 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
             attention_mask=attention_mask,
             **gen_kwargs,
         )
-
-
-    
-
 
 __all__ = [
     "Blip2Model",
