@@ -150,7 +150,7 @@ def main(cfg):
         processor=processor,
         image_size=cfg.data.image_size,
         max_length=cfg.data.max_length,
-        do_crop=cfg.data.do_crop,
+        do_crop=False,
         fov=cfg.data.fov,
         overlap_ratio=cfg.data.overlap_ratio,
     )
