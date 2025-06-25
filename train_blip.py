@@ -50,27 +50,35 @@ from einops import rearrange
 # Stage‑1 모델 (ITC+ITM)
 # -----------------------
 class BLIP2Stage1(nn.Module):
-    """논문 동일 Stage‑1: ITC + ITM"""
-
+    """
+    Stage-1: ITC + ITM   (BLIP/BLIP-2 논문식)
+    - proj_dim = blip2.config.projection_dim  (보통 256)
+    """
     def __init__(self, blip2: Blip2Model):
         super().__init__()
         self.blip2 = blip2
-        hidden = blip2.config.text_config.hidden_size
-        self.itm_head = nn.Linear(hidden, 2)
+        hid_q = blip2.config.text_config.hidden_size   # 768
+        self.itm_head = nn.Linear(blip2.config.projection_dim, 2)
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+
+    # Trainer 콜백용
     def gradient_checkpointing_enable(self, **kwargs):
-        """
-        Hugging Face Trainer 가 호출할 때 내부 blip2 모델에 위임.
-        kwargs(gradient_checkpointing_kwargs)도 그대로 전달.
-        """
         if hasattr(self.blip2, "gradient_checkpointing_enable"):
             self.blip2.gradient_checkpointing_enable(**kwargs)
-
     def gradient_checkpointing_disable(self):
         if hasattr(self.blip2, "gradient_checkpointing_disable"):
             self.blip2.gradient_checkpointing_disable()
-            
-    def forward(self, pixel_values=None, input_ids=None, attention_mask=None, labels=None, **kwargs):
+
+    def forward(
+        self,
+        pixel_values=None,
+        input_ids=None,
+        attention_mask=None,
+        **kwargs
+    ):
+        # ---------------------------------------------
+        # ① BLIP-2 인코더
+        # ---------------------------------------------
         out = self.blip2(
             pixel_values=pixel_values,
             input_ids=input_ids,
@@ -78,29 +86,37 @@ class BLIP2Stage1(nn.Module):
             return_dict=True,
         )
 
-        # ① 공통 256-D 임베딩으로 투영
-        img_emb = self.blip2.vision_proj(out.vision_outputs.pooler_output)   # (B, 256)
-        txt_emb = self.blip2.text_proj(out.qformer_outputs.pooler_output)    # (B, 256)
+        # ---------------------------------------------
+        # ② 256-D 공통 임베딩
+        # ---------------------------------------------
+        img_emb = self.blip2.vision_proj(out.vision_outputs.pooler_output)      # (B, 256)
+        txt_emb = self.blip2.text_proj(  out.qformer_outputs.pooler_output)     # (B, 256)
 
-        # ② 정규화
-        img_emb = nn.functional.normalize(img_emb, dim=-1)
-        txt_emb = nn.functional.normalize(txt_emb, dim=-1)
+        img_emb = F.normalize(img_emb, dim=-1)
+        txt_emb = F.normalize(txt_emb, dim=-1)
 
-        # ③ ITC
+        # ---------------------------------------------
+        # ③ ITC loss
+        # ---------------------------------------------
         logit_scale = self.logit_scale.exp()
-        sim = logit_scale * img_emb @ txt_emb.t()                            # (B, B)
-        targets = torch.arange(sim.size(0), device=sim.device)
-        loss_itc = (nn.functional.cross_entropy(sim, targets) + nn.functional.cross_entropy(sim.t(), targets)) / 2
+        logits_per_img = logit_scale * img_emb @ txt_emb.T          # (B, B)
+        targets = torch.arange(logits_per_img.size(0), device=img_emb.device)
+        loss_itc = (F.cross_entropy(logits_per_img, targets) +
+                    F.cross_entropy(logits_per_img.T, targets)) * 0.5
 
-        # ITM (50% negatives)
+        # ---------------------------------------------
+        # ④ ITM loss
+        #    50% negative: txt_emb permuted
+        # ---------------------------------------------
         bs = img_emb.size(0)
-        perm = torch.randperm(bs, device=img_emb.device)
-        mixed = torch.cat([txt_emb, txt_emb[perm]], dim=0)  # (2B,D)
+        neg_txt = txt_emb[torch.randperm(bs, device=img_emb.device)]
+        pair_emb = torch.cat([img_emb, img_emb], dim=0)             # (2B, 256)
+        txt_pair = torch.cat([txt_emb, neg_txt], dim=0)             # (2B, 256)
+        itm_logits = self.itm_head(pair_emb * txt_pair)             # simple fusion
         itm_labels = torch.cat([torch.ones(bs), torch.zeros(bs)]).long().to(img_emb.device)
-        cls = self.itm_head(mixed)
-        loss_itm = nn.functional.cross_entropy(cls, itm_labels)
-        return loss_itc + loss_itm
+        loss_itm = F.cross_entropy(itm_logits, itm_labels)
 
+        return loss_itc + loss_itm
 # -----------------------
 # 헬퍼: Q‑Former 확장
 # -----------------------
