@@ -50,19 +50,35 @@ from einops import rearrange
 # Stage‑1 모델 (ITC+ITM)
 # -----------------------
 class BLIP2Stage1(nn.Module):
-    def __init__(self, blip2: Blip2Model):
+    def __init__(self, blip2: Blip2Model, proj_dim: int = 256):
         super().__init__()
         self.blip2 = blip2
 
-        # ① proj_dim 안전 추출
-        if hasattr(blip2, "vision_proj"):
-            proj_dim = blip2.vision_proj.out_features                # HF ≥4.30
-        elif hasattr(blip2, "vision_projection"):                   # 일부 구버전
-            proj_dim = blip2.vision_projection.out_features
-        else:
-            raise ValueError("BLIP-2 모델에서 vision_proj 를 찾을 수 없습니다.")
+        # ───────────────────────────────────────────────
+        # 1. vision/text projection 레이어 확보
+        # ───────────────────────────────────────────────
+        def get_or_create(name_old, name_new, in_dim):
+            # ① 이미 존재?
+            if hasattr(blip2, name_old):
+                return getattr(blip2, name_old)
+            if hasattr(blip2, name_new):
+                return getattr(blip2, name_new)
 
-        self.itm_head = nn.Linear(proj_dim, 2)
+            # ② 없으면 새로 만든 뒤 setattr
+            layer = nn.Linear(in_dim, proj_dim)
+            nn.init.xavier_uniform_(layer.weight)
+            setattr(blip2, name_new, layer)      # 모델에 추가
+            return layer
+
+        # in_dim 추정
+        vision_hid = blip2.config.vision_config.hidden_size
+        text_hid   = blip2.config.qformer_config.hidden_size
+
+        self.vision_proj = get_or_create("vision_proj", "vision_proj", vision_hid)
+        self.text_proj   = get_or_create("text_proj",   "text_proj",   text_hid)
+
+        # ───────────────────────────────────────────────
+        self.itm_head   = nn.Linear(proj_dim, 2)
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
     # Trainer 콜백용
     def gradient_checkpointing_enable(self, **kwargs):
