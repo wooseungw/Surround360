@@ -58,7 +58,18 @@ class BLIP2Stage1(nn.Module):
         hidden = blip2.config.qformer_config.hidden_size
         self.itm_head = nn.Linear(hidden, 2)
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+    def gradient_checkpointing_enable(self, **kwargs):
+        """
+        Hugging Face Trainer 가 호출할 때 내부 blip2 모델에 위임.
+        kwargs(gradient_checkpointing_kwargs)도 그대로 전달.
+        """
+        if hasattr(self.blip2, "gradient_checkpointing_enable"):
+            self.blip2.gradient_checkpointing_enable(**kwargs)
 
+    def gradient_checkpointing_disable(self):
+        if hasattr(self.blip2, "gradient_checkpointing_disable"):
+            self.blip2.gradient_checkpointing_disable()
+            
     def forward(self, pixel_values=None, input_ids=None, attention_mask=None, labels=None):
         out = self.blip2(pixel_values=pixel_values, input_ids=input_ids, attention_mask=attention_mask, return_dict=True)
         img_emb = nn.functional.normalize(out.vision_outputs.pooler_output, dim=-1)  # (B,D)
