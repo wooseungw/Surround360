@@ -1,11 +1,11 @@
 #!/usr/bin/env python
 """
-train_surround360.py – Panorama-aware BLIP-2 Stage-1 trainer
+train_surround360.py – Panorama‑aware BLIP‑2 Stage‑1 trainer
 -----------------------------------------------------------
 
 • YAML 하나만 넘기면 ▶ 데이터 로드 → 학습 → 체크포인트 저장까지 전자동
-• BLIP-2(OPT 2.7B) + Q-Former + ITC/ITM loss (논문 재현)
-• Deepspeed / WandB / Gradient-Checkpointing 모두 옵션 지원
+• BLIP‑2(OPT 2.7B) + Q‑Former + ITC/ITM loss (논문 재현)
+• Deepspeed / WandB / Gradient‑Checkpointing 모두 옵션 지원
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ def set_seed(seed: int = 42):
     random.seed(seed); np.random.seed(seed)
     torch.manual_seed(seed); torch.cuda.manual_seed_all(seed)
 
-# -------------------- Q-Former token resize -------------------
+# -------------------- Q‑Former token resize -------------------
 
 def resize_qformer_token(model: Blip2Model, num_q: int) -> Blip2Model:
     """쿼리 토큰 수를 늘리거나 줄인다 (기존 가중치 보존)."""
@@ -51,10 +51,10 @@ def resize_qformer_token(model: Blip2Model, num_q: int) -> Blip2Model:
     model.config.num_query_tokens = num_q
     return model
 
-# --------------------- Stage-1 wrapper ------------------------
+# --------------------- Stage‑1 wrapper ------------------------
 
 class BLIP2Stage1(nn.Module):
-    """BLIP-2 Stage-1: Image-Text Contrastive + Matching"""
+    """BLIP‑2 Stage‑1: Image‑Text Contrastive + Matching"""
 
     def __init__(self, blip2: Blip2Model, proj_dim: int = 256):
         super().__init__()
@@ -77,7 +77,7 @@ class BLIP2Stage1(nn.Module):
         self.itm_head   = nn.Linear(proj_dim, 2)
         self.logit_scale = nn.Parameter(torch.ones([]) * math.log(1/0.07))
 
-    # gradient-checkpoint 패스스루
+    # gradient‑checkpoint 패스스루
     def gradient_checkpointing_enable(self, **kw):
         if hasattr(self.blip2, "gradient_checkpointing_enable"):
             self.blip2.gradient_checkpointing_enable(**kw)
@@ -139,7 +139,7 @@ def main(cfg):
 
     model = BLIP2Stage1(base) if cfg.training.train_itm else Blip2ForConditionalGeneration.from_pretrained(cfg.model.pretrain_name)
 
-    # 비-QFormer 파라미터 동결
+    # 비‑QFormer 파라미터 동결
     for n, p in model.named_parameters():
         if not n.startswith("blip2.qformer"):
             p.requires_grad = False
