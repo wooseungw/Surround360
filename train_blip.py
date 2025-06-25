@@ -44,6 +44,8 @@ import pandas as pd
 import numpy as np
 import wandb
 from PIL import Image
+# 최대 픽셀 수 제한 해제 (None으로 설정)
+Image.MAX_IMAGE_PIXELS = None
 from einops import rearrange
 
 # -----------------------

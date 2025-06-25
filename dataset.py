@@ -1,6 +1,8 @@
 from typing import Dict, Union, Optional
 import pandas as pd
 from PIL import Image
+# 최대 픽셀 수 제한 해제 (None으로 설정)
+Image.MAX_IMAGE_PIXELS = None
 from torch.utils.data import Dataset
 from transformers import Blip2Processor
 from py360convert import e2p
