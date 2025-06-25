@@ -134,8 +134,6 @@ class QuIC360Dataset(Dataset):
         return torch.stack(patches, dim=0).unsqueeze(0)
 
 def data_collator(features):
-    wanted_tensors = ["pixel_values", "input_ids", "attention_mask", "labels"]
-    batch = {k: torch.stack([f[k] for f in features]) for k in wanted_tensors}
     """Simple data collator for BLIP2"""
     # 입력 검증
     if not features:

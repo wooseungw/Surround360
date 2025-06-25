@@ -70,7 +70,12 @@ class BLIP2Stage1(nn.Module):
         if hasattr(self.blip2, "gradient_checkpointing_disable"):
             self.blip2.gradient_checkpointing_disable()
             
-    def forward(self, pixel_values=None, input_ids=None, attention_mask=None, labels=None):
+    def forward(self, 
+                pixel_values=None, 
+                input_ids=None, 
+                attention_mask=None, 
+                labels=None,
+                **kwargs) -> torch.Tensor:
         out = self.blip2(pixel_values=pixel_values, input_ids=input_ids, attention_mask=attention_mask, return_dict=True)
         img_emb = nn.functional.normalize(out.vision_outputs.pooler_output, dim=-1)  # (B,D)
         txt_emb = nn.functional.normalize(out.qformer_outputs.pooler_output, dim=-1)  # (B,D)
