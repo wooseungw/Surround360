@@ -70,19 +70,25 @@ class BLIP2Stage1(nn.Module):
         if hasattr(self.blip2, "gradient_checkpointing_disable"):
             self.blip2.gradient_checkpointing_disable()
             
-    def forward(self, 
-                pixel_values=None, 
-                input_ids=None, 
-                attention_mask=None, 
-                labels=None,
-                **kwargs) -> torch.Tensor:
-        out = self.blip2(pixel_values=pixel_values, input_ids=input_ids, attention_mask=attention_mask, return_dict=True)
-        img_emb = nn.functional.normalize(out.vision_outputs.pooler_output, dim=-1)  # (B,D)
-        txt_emb = nn.functional.normalize(out.qformer_outputs.pooler_output, dim=-1)  # (B,D)
+    def forward(self, pixel_values=None, input_ids=None, attention_mask=None, labels=None, **kwargs):
+        out = self.blip2(
+            pixel_values=pixel_values,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            return_dict=True,
+        )
 
-        # ITC
+        # ① 공통 256-D 임베딩으로 투영
+        img_emb = self.blip2.vision_proj(out.vision_outputs.pooler_output)   # (B, 256)
+        txt_emb = self.blip2.text_proj(out.qformer_outputs.pooler_output)    # (B, 256)
+
+        # ② 정규화
+        img_emb = nn.functional.normalize(img_emb, dim=-1)
+        txt_emb = nn.functional.normalize(txt_emb, dim=-1)
+
+        # ③ ITC
         logit_scale = self.logit_scale.exp()
-        sim = logit_scale * img_emb @ txt_emb.t()
+        sim = logit_scale * img_emb @ txt_emb.t()                            # (B, B)
         targets = torch.arange(sim.size(0), device=sim.device)
         loss_itc = (nn.functional.cross_entropy(sim, targets) + nn.functional.cross_entropy(sim.t(), targets)) / 2
 
