@@ -50,17 +50,20 @@ from einops import rearrange
 # Stage‑1 모델 (ITC+ITM)
 # -----------------------
 class BLIP2Stage1(nn.Module):
-    """
-    Stage-1: ITC + ITM   (BLIP/BLIP-2 논문식)
-    - proj_dim = blip2.config.projection_dim  (보통 256)
-    """
     def __init__(self, blip2: Blip2Model):
         super().__init__()
         self.blip2 = blip2
-        hid_q = blip2.config.text_config.hidden_size   # 768
-        self.itm_head = nn.Linear(blip2.config.projection_dim, 2)
-        self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
 
+        # ① proj_dim 안전 추출
+        if hasattr(blip2, "vision_proj"):
+            proj_dim = blip2.vision_proj.out_features                # HF ≥4.30
+        elif hasattr(blip2, "vision_projection"):                   # 일부 구버전
+            proj_dim = blip2.vision_projection.out_features
+        else:
+            raise ValueError("BLIP-2 모델에서 vision_proj 를 찾을 수 없습니다.")
+
+        self.itm_head = nn.Linear(proj_dim, 2)
+        self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
     # Trainer 콜백용
     def gradient_checkpointing_enable(self, **kwargs):
         if hasattr(self.blip2, "gradient_checkpointing_enable"):
