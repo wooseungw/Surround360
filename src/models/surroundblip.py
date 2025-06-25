@@ -45,6 +45,7 @@ from transformers.utils import (
 from transformers import AutoModelForCausalLM, AutoModelForSeq2SeqLM
 from .configuration_blip_2 import Blip2Config, Blip2QFormerConfig, Blip2VisionConfig
 from ..loss.vicreg import VICRegLoss
+from ..loss.blip2_loss import MultiModalITLoss
 
 logger = logging.get_logger(__name__)
 
@@ -2026,436 +2027,133 @@ class Blip2VisionModelWithProjection(Blip2PreTrainedModel):
     BLIP_2_START_DOCSTRING,
 )
 class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
+    """Refactored SurroundBlip with shared vision‑language encoding and MultiModalITLoss."""
+
     config_class = Blip2Config
     main_input_name = "pixel_values"
     _supports_cache_class = True
     _supports_static_cache = True
-    _supports_quantized_cache = False  # not all LM bacbones support (e.g. T5)
+    _supports_quantized_cache = False
     _keep_in_fp32_modules = ["query_tokens", "qformer"]
 
+    # ------------------------------------------------------------
+    # INITIALIZATION
+    # ------------------------------------------------------------
     def __init__(self, config: Blip2Config):
         super().__init__(config)
 
+        # Modules
         self.vision_model = Blip2VisionModel(config.vision_config)
-
         self.query_tokens = nn.Parameter(torch.zeros(1, config.num_query_tokens, config.qformer_config.hidden_size))
-        print("init_ query_tokens", self.query_tokens.shape)
         self.qformer = Blip2QFormerModel(config.qformer_config)
-
         self.language_projection = nn.Linear(config.qformer_config.hidden_size, config.text_config.hidden_size)
-        if config.use_decoder_only_language_model:
-            language_model = AutoModelForCausalLM.from_config(config.text_config)
-        else:
-            language_model = AutoModelForSeq2SeqLM.from_config(config.text_config)
-        
-        self.vicreg_loss = VICRegLoss(
-            sim_coef=getattr(config, "vicreg_sim_coef", 25.0),
-            var_coef=getattr(config, "vicreg_var_coef", 25.0),
-            cov_coef=getattr(config, "vicreg_cov_coef", 1.0)
+        self.language_model = (
+            AutoModelForCausalLM.from_config(config.text_config)
+            if config.use_decoder_only_language_model
+            else AutoModelForSeq2SeqLM.from_config(config.text_config)
         )
-        
-        # Update _tied_weights_keys using the base model used.
-        if language_model._tied_weights_keys is not None:
-            self._tied_weights_keys = [f"language_model.{k}" for k in language_model._tied_weights_keys]
 
-        self.language_model = language_model
+        # Loss
+        self.mm_loss = MultiModalITLoss(vocab_size=config.text_config.vocab_size)
 
-        # Initialize weights and apply final processing
+        # weight tying quirks
+        if self.language_model._tied_weights_keys is not None:
+            self._tied_weights_keys = [f"language_model.{k}" for k in self.language_model._tied_weights_keys]
+
         self.post_init()
 
+    # ------------------------------------------------------------
+    # SHARED ENCODING LOGIC – used by both forward & generate
+    # ------------------------------------------------------------
+    def _encode_image(self, pixel_values: torch.FloatTensor, interpolate_pos_encoding: bool = False):
+        """Return query_output, image_embeds, masks, and intermediate outputs."""
+        B, P, C, H, W = pixel_values.shape
+        flat_pixels = pixel_values.view(B * P, C, H, W)
+
+        vision_out = self.vision_model(
+            flat_pixels, return_dict=True, interpolate_pos_encoding=interpolate_pos_encoding
+        )
+        img_embeds = vision_out.last_hidden_state  # (BP, S, D)
+
+        # Q‑Former
+        S, D = img_embeds.shape[1], img_embeds.shape[2]
+        img_attention = torch.ones((B * P, S), dtype=torch.long, device=img_embeds.device)
+        q_tokens = self.query_tokens.expand(B * P, -1, -1)
+        q_out = self.qformer(
+            query_embeds=q_tokens,
+            encoder_hidden_states=img_embeds,
+            encoder_attention_mask=img_attention,
+            return_dict=True,
+        ).last_hidden_state  # (BP, Q, D)
+
+        # merge patches dimension back (B, P*Q, D)
+        q_out = q_out.view(B, P * self.config.num_query_tokens, D)
+        proj_q = self.language_projection(q_out)
+        lang_mask = torch.ones(proj_q.shape[:2], dtype=torch.long, device=proj_q.device)
+        return proj_q, lang_mask, q_out.mean(1), vision_out  # mean pooled feat for IT losses
+
+    # ------------------------------------------------------------
+    # BASIC LANGUAGE MODEL HELPERS
+    # ------------------------------------------------------------
     def get_input_embeddings(self):
         return self.language_model.get_input_embeddings()
 
     def set_input_embeddings(self, value):
         self.language_model.set_input_embeddings(value)
 
-    def set_output_embeddings(self, new_embeddings):
-        self.language_model.set_output_embeddings(new_embeddings)
-
-    def get_output_embeddings(self) -> nn.Module:
-        return self.language_model.get_output_embeddings()
-
-    def get_encoder(self):
-        return self.language_model.get_encoder()
-
-    def get_decoder(self):
-        return self.language_model.get_decoder()
-
-    def get_image_features(self):
-        return self.vision_model.get_image_features()
-    
-    def get_text_features(self , input_ids: Optional[torch.Tensor] = None, attention_mask: Optional[torch.Tensor] = None, return_dict: Optional[bool] = None):
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-        if self.config.use_decoder_only_language_model:
-            text_outputs = self.language_model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                output_attentions=True,
-                output_hidden_states=True,
-                return_dict=return_dict,
-            )
-        else:
-            inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
-
-            text_outputs = self.language_model(
-                inputs_embeds=inputs_embeds,
-                attention_mask=attention_mask,
-                output_attentions=True,
-                output_hidden_states=True,
-                return_dict=return_dict,
-            )
-        return text_outputs
-        
-
-    def _tie_weights(self):
-        if not self.config.use_decoder_only_language_model:
-            self.language_model.encoder.embed_tokens = self.language_model.shared
-            self.language_model.decoder.embed_tokens = self.language_model.shared
-
-    def _preprocess_accelerate(self):
-        r"""
-        Some pre-processing hacks to make the model `accelerate` compatible. Check
-        https://github.com/huggingface/transformers/pull/21707 for more details.
-        """
-        hf_device_map = self.hf_device_map
-
-        if len(hf_device_map) > 1 and "language_model" not in hf_device_map and torch.cuda.device_count() > 1:
-            # warn users about unexpected behavior when using multi-GPU + BLIP-2 + `accelerate`.
-            logger.warning(
-                "The `language_model` is not in the `hf_device_map` dictionary and you are running your script"
-                " in a multi-GPU environment. this may lead to unexpected behavior when using `accelerate`."
-                " Please pass a `device_map` that contains `language_model` to remove this warning."
-                " Please refer to https://github.com/huggingface/blog/blob/main/accelerate-large-models.md for"
-                " more details on creating a `device_map` for large models.",
-            )
-
-        if hasattr(self.language_model, "_hf_hook"):
-            self.language_model._hf_hook.io_same_device = True  # For `generate` compatibility
-
-    @add_start_docstrings_to_model_forward(BLIP_2_INPUTS_DOCSTRING)
-    @replace_return_docstrings(output_type=Blip2ForConditionalGenerationModelOutput, config_class=Blip2VisionConfig)
+    # ------------------------------------------------------------
+    # FORWARD (TRAINING)
+    # ------------------------------------------------------------
     def forward(
         self,
         pixel_values: torch.FloatTensor,
-        input_ids: torch.FloatTensor,
+        input_ids: torch.LongTensor,
         attention_mask: Optional[torch.LongTensor] = None,
-        decoder_input_ids: Optional[torch.LongTensor] = None,
-        decoder_attention_mask: Optional[torch.LongTensor] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
         labels: Optional[torch.LongTensor] = None,
-        return_dict: Optional[bool] = None,
         interpolate_pos_encoding: bool = False,
-        use_cache: Optional[bool] = None,
-        overlap_consistency_weight: float = 0.5,  # 일관성 손실의 가중치
+        **unused,
     ) -> Union[Tuple, Blip2ForConditionalGenerationModelOutput]:
-        r"""
-        Returns:
+        return_dict = self.config.use_return_dict
 
-        Examples:
-
-        Prepare processor, model and image input
-
-        ```python
-        >>> from PIL import Image
-        >>> import requests
-        >>> from transformers import Blip2Processor, Blip2ForConditionalGeneration
-        >>> import torch
-
-        >>> device = "cuda" if torch.cuda.is_available() else "cpu"
-
-        >>> processor = Blip2Processor.from_pretrained("Salesforce/blip2-opt-2.7b")
-        >>> model = Blip2ForConditionalGeneration.from_pretrained(
-        ...     "Salesforce/blip2-opt-2.7b", load_in_8bit=True, device_map={"": 0}, torch_dtype=torch.float16
-        ... )  # doctest: +IGNORE_RESULT
-
-        >>> url = "http://images.cocodataset.org/val2017/000000039769.jpg"
-        >>> image = Image.open(requests.get(url, stream=True).raw)
-        ```
-
-        Image captioning (without providing a text prompt):
-
-        ```python
-        >>> inputs = processor(images=image, return_tensors="pt").to(device, torch.float16)
-
-        >>> generated_ids = model.generate(**inputs)
-        >>> generated_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
-        >>> print(generated_text)
-        two cats laying on a couch
-        ```
-
-        Visual question answering (prompt = question):
-
-        ```python
-        >>> prompt = "Question: how many cats are there? Answer:"
-        >>> inputs = processor(images=image, text=prompt, return_tensors="pt").to(device="cuda", dtype=torch.float16)
-
-        >>> generated_ids = model.generate(**inputs)
-        >>> generated_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
-        >>> print(generated_text)
-        two
-        ```
-
-        Note that int8 inference is also supported through [bitsandbytes](https://github.com/TimDettmers/bitsandbytes).
-        This greatly reduces the amount of memory used by the model while maintaining the same performance.
-
-        ```python
-        >>> model = Blip2ForConditionalGeneration.from_pretrained(
-        ...     "Salesforce/blip2-opt-2.7b", load_in_8bit=True, device_map={"": 0}, torch_dtype=torch.bfloat16
-        ... )  # doctest: +IGNORE_RESULT
-
-        >>> inputs = processor(images=image, text=prompt, return_tensors="pt").to(device="cuda", dtype=torch.bfloat16)
-
-        >>> generated_ids = model.generate(**inputs)
-        >>> generated_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
-        >>> print(generated_text)
-        two
-        ```"""
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-        # 디버깅을 위한 초기 입력값 정보 출력
-        
-        # step 0: remove patch dimensions from pixel_values
-        B, P, C, H, W = pixel_values.shape
-        
-        pixel_values = pixel_values.view(B * P, C, H, W)
-        
-        # step 1: forward the images through the vision encoder,
-        # to get image embeddings of shape (batch_size, seq_len, hidden_size)
-        vision_outputs = self.vision_model(
-            pixel_values=pixel_values,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-            interpolate_pos_encoding=interpolate_pos_encoding,
+        # shared encode
+        proj_q, lang_mask, pooled_img, vision_out = self._encode_image(
+            pixel_values, interpolate_pos_encoding=interpolate_pos_encoding
         )
-        BP, S, D = vision_outputs[0].shape
-        image_embeds = vision_outputs[0]
-        # 원본 (B*P, S, D) 형태의 image_embeds를 유지
-        original_image_embeds = vision_outputs[0]  # (B*P, S, D)
-        
-        # 모델 아키텍처에 따라 다를 수 있는 S(시퀀스 길이) 처리
-        # ViT-B/16: S=196 (14x14 패치)
-        # ViT-L/16: S=256 (16x16 패치) 
-        # ViT 모델들은 종종 CLS 토큰을 추가하여 S+1 형태가 됨 (예: 196+1=197 또는 256+1=257)
-        
-        # S가 완전한 제곱수인지 확인
-        H = int(S ** 0.5)
-        if H*H == S:
-            W = H
-        else:
-            # 완전한 제곱수가 아니면 실제 형태 계산
-            # 예를 들어, ViT-L/14에서는 패치가 16x16 또는 다른 크기일 수 있음
-            if S == 257:  # ViT CLS 토큰이 있는 경우 (256 + 1)
-                H, W = 16, 16  # 첫 번째 토큰을 CLS 토큰으로 가정 (16x16=256 패치 + 1 CLS 토큰)
-                # CLS 토큰 제외하고 공간 구조로 재구성 ([:, 1:, :] = 첫 번째 CLS 토큰 제외)
-                spatial_embeds = original_image_embeds[:, 1:, :].view(B, P, H, W, D)
-                
-            else:
-                # 가장 가까운 제곱근으로 H를 설정하고 나머지를 W에 할당
-                H = int(S ** 0.5)
-                W = S // H
-                if H*W != S:
-                    # 그래도 맞지 않으면 특정 모델에 맞는 값 수동 설정
-                    H, W = 14, 14
 
-        # 텐서 재구성 시도
-        try:
-            # 2D 공간 구조로 재구성 (B,P,H,W,D)
-            spatial_embeds = original_image_embeds.view(B, P, H, W, D)
-            
-        except RuntimeError as e:
-            # 백업 방법: reshape 불가능하면 학습 계속 진행
-            H = 14
-            W = 14
-            # 텐서 크기 맞추기
-            required_size = B * P * H * W * D
-            if original_image_embeds.numel() > required_size:
-                # 필요한 크기에 맞게 잘라내기
-                cut_S = H * W
-                spatial_embeds = original_image_embeds[:, :cut_S, :].view(B, P, H, W, D)
-            else:
-                # 기본 1D 형태로 유지 (VICReg 손실 계산을 건너뛰게 됨)
-                spatial_embeds = None
-        
-        # VICReg 손실 계산 부분 수정 - 2D 공간 관계 활용
-        overlap_loss = 0.0
-        vicreg_losses = {"sim_loss": 0.0, "var_loss": 0.0, "cov_loss": 0.0}
-        
-        # 2D 공간에서 인접 관계 계산
-        if P > 1 and spatial_embeds is not None:  # 여러 패치가 있고 공간 구조가 성공적으로 생성된 경우
-            vicreg_total_loss = 0.0
-            num_pairs = 0
-            
-            # 인접 패치 쌍 찾기 (예: 파노라마인 경우 왼쪽-오른쪽 경계)
-            # 여기서는 간단한 원형 연결을 가정함
-            for i in range(P):
-                next_i = (i + 1) % P  # 원형 구조를 위한 모듈로 연산
-                
-                # 현재 패치의 오른쪽 경계와 다음 패치의 왼쪽 경계
-                # 2D 구조에서 W 방향 경계에서 추출
-                current_right_border = spatial_embeds[:, i, :, -1, :]  # (B, H, D)
-                next_left_border = spatial_embeds[:, next_i, :, 0, :]  # (B, H, D)
-                
-                # 메모리 효율적인 VICReg 손실 계산
-                # 경계 영역에 대해 일관성 유지
-                border_loss, border_losses = self.vicreg_loss(
-                    current_right_border, 
-                    next_left_border,
-                    sample_ratio=overlap_consistency_weight
-                )
-                
-                vicreg_total_loss += border_loss
-                num_pairs += 1
-                
-                # 상하 경계도 동일하게 처리 (파노라마의 위아래 연결이 있는 경우)
-                current_bottom_border = spatial_embeds[:, i, -1, :, :]  # (B, W, D)
-                next_top_border = spatial_embeds[:, next_i, 0, :, :]  # (B, W, D)
-                
-                vertical_loss, vertical_losses = self.vicreg_loss(
-                    current_bottom_border,
-                    next_top_border,
-                    sample_ratio=overlap_consistency_weight
-                )
-                
-                vicreg_total_loss += vertical_loss
-                num_pairs += 1
-                
-                # 손실 컴포넌트 누적
-                for key in vicreg_losses:
-                    vicreg_losses[key] += (border_losses[key] + vertical_losses[key]) / 2
-            
-            # 패치 쌍 수로 정규화
-            if num_pairs > 0:
-                overlap_loss = vicreg_total_loss / num_pairs
-                
-                # 손실 컴포넌트도 정규화
-                for key in vicreg_losses:
-                    vicreg_losses[key] /= num_pairs
-        
-        # 원본 이미지 임베딩은 (B*P, S, D) 형태입니다.
-        # Q-Former로 전달하기 전에 (B, P*S, D) 형태로 변환해야 합니다.
-        # 이렇게 해야 배치 크기가 B로 유지되며 어텐션 마스크와 일관성이 유지됩니다.
-        image_embeds = original_image_embeds.reshape(B, P, S, D)  # 먼저 (B, P, S, D)로 변환
-        image_embeds = image_embeds.reshape(B * P, S, D)          # 그런 다음 (B, P*S, D)로 변환
-        
-        # 어텐션 마스크 생성 - 배치 크기 B를 유지하고, 시퀀스 길이는 P*S
-        image_attention_mask = torch.ones((B * P, S), dtype=torch.long, device=image_embeds.device)
-        
-        query_tokens = self.query_tokens.expand(image_embeds.shape[0], -1, -1)
-        
-        # 배치 차원이 일치하는지 확인
-        assert query_tokens.shape[0] == image_embeds.shape[0], "배치 차원이 일치하지 않습니다"
-        assert query_tokens.shape[0] == image_attention_mask.shape[0], "쿼리 토큰과 어텐션 마스크의 배치 차원이 일치하지 않습니다"
-        assert image_embeds.shape[0] == image_attention_mask.shape[0], "이미지 임베딩과 어텐션 마스크의 배치 차원이 일치하지 않습니다"
-        assert image_embeds.shape[1] == image_attention_mask.shape[1], "이미지 임베딩과 어텐션 마스크의 시퀀스 길이가 일치하지 않습니다"
-        
-        query_outputs = self.qformer(
-            query_embeds=query_tokens,
-            encoder_hidden_states=image_embeds,
-            encoder_attention_mask=image_attention_mask,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-        )
-        query_output = query_outputs[0]
-        
-        query_output = query_output.view(B, P * self.config.num_query_tokens, -1)
-        # Qformer is kept in fp32, we downcast the output back if needed
-        if query_output.dtype != image_embeds.dtype:
-            query_output = query_output.to(image_embeds.dtype)
-
-        # step 3: use the language model, conditioned on the query outputs and the prompt
-        language_model_inputs = self.language_projection(query_output)
-        language_model_attention_mask = torch.ones(
-            language_model_inputs.size()[:-1], dtype=torch.long, device=language_model_inputs.device
-        )
-        inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
+        # prepend / replace image tokens into LM input
+        txt_embeds = self.get_input_embeddings()(input_ids)
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids)
+        inputs_embeds = torch.cat([proj_q, txt_embeds], dim=1)
+        attention_mask = torch.cat([lang_mask, attention_mask], dim=1)
 
-        # if the model already has "image_token_index" then the input is expanded to account for image embeds
-        # otherwise we expand manually by concating
-        if getattr(self.config, "image_token_index", None) is not None:
-            special_image_mask = (input_ids == self.config.image_token_index).unsqueeze(-1).expand_as(inputs_embeds)
-            language_model_inputs = language_model_inputs.to(inputs_embeds.device, inputs_embeds.dtype)
-            inputs_embeds = inputs_embeds.masked_scatter(special_image_mask, language_model_inputs)
-        else:
-            logger.warning_once(
-                "Expanding inputs for image tokens in BLIP-2 should be done in processing. "
-                "Please follow instruction here (https://gist.github.com/zucchini-nlp/e9f20b054fa322f84ac9311d9ab67042) to update your BLIP-2 model. "
-                "Using processors without these attributes in the config is deprecated and will throw an error in v4.50."
-            )
-            inputs_embeds = torch.cat([language_model_inputs, inputs_embeds.to(language_model_inputs.device)], dim=1)
-            attention_mask = torch.cat(
-                [language_model_attention_mask, attention_mask.to(language_model_attention_mask.device)], dim=1
-            )
+        # LM forward
+        outputs = self.language_model(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            labels=labels,
+            return_dict=True,
+        )
+        lm_logits = outputs.logits
+        pooled_txt = proj_q.mean(1)  # surrogate text feat for ITC/ITM
 
-        if self.config.use_decoder_only_language_model:
-            outputs = self.language_model(
-                inputs_embeds=inputs_embeds,
-                attention_mask=attention_mask,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-                return_dict=return_dict,
-                use_cache=use_cache,
-            )
-            logits = outputs.logits if return_dict else outputs[0]
-            loss = None
-            # we compute the loss here since we need to take into account the sequence length of the query embeds
-            if labels is not None:
-                labels = labels.to(logits.device)
-                logits = logits[:, -labels.size(1) :, :]
-                # Shift so that tokens < n predict n
-                shift_logits = logits[..., :-1, :].contiguous()
-                shift_labels = labels[..., 1:].contiguous().to(logits.device)
+        # compute multimodal loss
+        mm_loss, loss_dict = self.mm_loss(pooled_img, pooled_txt, lm_logits, labels)
 
-                # Flatten the tokens
-                loss_fct = CrossEntropyLoss(reduction="mean")
-
-                loss = loss_fct(shift_logits.view(-1, self.config.text_config.vocab_size), shift_labels.view(-1))
-        else:
-            outputs = self.language_model(
-                inputs_embeds=inputs_embeds,
-                attention_mask=attention_mask,
-                decoder_input_ids=decoder_input_ids,
-                decoder_attention_mask=decoder_attention_mask,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-                return_dict=True,  # toggle for easier access to loss/logits below
-                labels=labels,
-                use_cache=use_cache,
-            )
-            loss = outputs.loss
-            logits = outputs.logits
-            outputs = outputs.to_tuple() if not return_dict else outputs
-            # 기존 손실에 오버랩 일관성 손실 추가 (만약 계산되었다면)
-            if loss is not None and spatial_embeds is not None and P > 1:
-                # 패치가 여러 개이고 공간 임베딩이 계산된 경우에만 일관성 손실 추가
-                print(f"Adding overlap consistency loss (weight={overlap_consistency_weight:.3f}, value={overlap_loss:.6f})")
-                loss = loss + overlap_consistency_weight * overlap_loss
-            elif spatial_embeds is not None and P > 1:
-                # 언어 모델 손실이 없는 경우 일관성 손실만 사용
-                loss = overlap_consistency_weight * overlap_loss
-                
-        # 손실이 여전히 None이면 기본값 설정 (훈련에 문제가 없도록)
-        if loss is None:
-            # 학습 시 손실 계산에 문제가 있는 경우 기본값으로 0 손실 반환
-            # 이는 디버깅 목적이며, 실제 학습에서는 유의미한 손실이 계산되어야 함
-            print("Warning: Loss is None. Using dummy loss=0.0 to continue training.")
-            loss = torch.tensor(0.0, device=inputs_embeds.device)
-                
         if not return_dict:
-            output = (logits, vision_outputs, query_outputs, outputs)
-            return ((loss,) + output) if loss is not None else output
+            return (mm_loss, lm_logits)
 
         return Blip2ForConditionalGenerationModelOutput(
-            loss=loss,
-            logits=logits,
-            vision_outputs=vision_outputs,
-            qformer_outputs=query_outputs,
+            loss=mm_loss,
+            logits=lm_logits,
+            vision_outputs=vision_out,
+            qformer_outputs=None,
             language_model_outputs=outputs,
         )
 
+    # ------------------------------------------------------------
+    # GENERATION
+    # ------------------------------------------------------------
     @torch.no_grad()
     def generate(
         self,
@@ -2463,121 +2161,27 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         input_ids: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.LongTensor] = None,
         interpolate_pos_encoding: bool = False,
-        **generate_kwargs,
+        **gen_kwargs,
     ) -> torch.LongTensor:
-        """
-        Overrides `generate` function to be able to use the model as a conditional generator.
+        self._preprocess_accelerate() if hasattr(self, "hf_device_map") else None
+        proj_q, lang_mask, _pooled, _ = self._encode_image(pixel_values, interpolate_pos_encoding)
 
-        Args:
-            pixel_values (`torch.FloatTensor` of shape (batch_size, num_channels, height, width)):
-                Input images to be processed.
-            input_ids (`torch.LongTensor` of shape (batch_size, sequence_length), *optional*):
-                The sequence used as a prompt for the generation.
-            attention_mask (`torch.LongTensor` of shape (batch_size, sequence_length), *optional*):
-                Mask to avoid performing attention on padding token indices
-
-        Returns:
-            captions (list): A list of strings of length batch_size * num_captions.
-        """
-        if hasattr(self, "hf_device_map"):
-            # preprocess for `accelerate`
-            self._preprocess_accelerate()
-
-        # step 0: remove patch dimensions from pixel_values
-        B, P, C, H, W = pixel_values.shape
-        pixel_values = pixel_values.view(B * P, C, H, W)
-        
-        # step 1: forward the images through the vision encoder
-        batch_size = B
-        vision_outputs = self.vision_model(
-            pixel_values,
-            return_dict=True,
-            interpolate_pos_encoding=interpolate_pos_encoding,
-        )
-        image_embeds = vision_outputs.last_hidden_state  # (B*P, S, D)
-        # 원본 (B*P, S, D) 형태의 image_embeds를 유지
-        original_image_embeds = vision_outputs.last_hidden_state  # (B*P, S, D)
-        
-        S, D = image_embeds.shape[1], image_embeds.shape[2]
-        
-        # 원본 이미지 임베딩은 (B*P, S, D) 형태입니다.
-        # Q-Former로 전달하기 전에 동일한 형태로 처리합니다.
-        image_embeds = original_image_embeds.reshape(B, P, S, D)  # 먼저 (B, P, S, D)로 변환
-        image_embeds = image_embeds.reshape(B * P, S, D)          # 그런 다음 (B*P, S, D)로 변환
-        
-        # 어텐션 마스크 생성 - forward와 일관되게 (B * P, S) 형태로 생성
-        image_attention_mask = torch.ones((B * P, S), dtype=torch.long, device=image_embeds.device)
-        
-        query_tokens = self.query_tokens.expand(image_embeds.shape[0], -1, -1)
-        
-        # 배치 차원이 일치하는지 확인 (forward와 동일)
-        assert query_tokens.shape[0] == image_embeds.shape[0], "배치 차원이 일치하지 않습니다"
-        assert query_tokens.shape[0] == image_attention_mask.shape[0], "쿼리 토큰과 어텐션 마스크의 배치 차원이 일치하지 않습니다"
-        assert image_embeds.shape[0] == image_attention_mask.shape[0], "이미지 임베딩과 어텐션 마스크의 배치 차원이 일치하지 않습니다"
-        assert image_embeds.shape[1] == image_attention_mask.shape[1], "이미지 임베딩과 어텐션 마스크의 시퀀스 길이가 일치하지 않습니다"
-        query_outputs = self.qformer(
-            query_embeds=query_tokens,
-            encoder_hidden_states=image_embeds,
-            encoder_attention_mask=image_attention_mask,
-            return_dict=True,
-        )
-        query_output = query_outputs.last_hidden_state
-        
-        # forward와 동일하게 query_output 처리
-        query_output = query_output.view(B, P * self.config.num_query_tokens, -1)
-
-        # Qformer is kept in fp32, we downcast the output back if needed
-        if query_output.dtype != image_embeds.dtype:
-            query_output = query_output.to(image_embeds.dtype)
-
-        language_model_inputs = self.language_projection(query_output)
-        language_attention_mask = torch.ones(
-            language_model_inputs.size()[:-1], dtype=torch.long, device=language_model_inputs.device
-        )
-
+        # build prompt embeds
         if input_ids is None:
-            start_tokens = [self.config.text_config.bos_token_id]
-            if getattr(self.config, "image_token_index", None) is not None:
-                start_tokens = [self.config.image_token_index] * self.config.num_query_tokens + start_tokens
-            input_ids = torch.tensor([start_tokens], dtype=torch.long, device=image_embeds.device)
-            input_ids = input_ids.repeat(batch_size, 1)
-
-        inputs_embeds = self.get_input_embeddings()(input_ids)
+            bos = torch.tensor([[self.config.text_config.bos_token_id]], device=pixel_values.device)
+            input_ids = bos.repeat(pixel_values.size(0), 1)
+        txt_embeds = self.get_input_embeddings()(input_ids)
+        inputs_embeds = torch.cat([proj_q, txt_embeds], dim=1)
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids)
+        attention_mask = torch.cat([lang_mask, attention_mask], dim=1)
 
-        # if the model already has "image_token_index" then the input is expanded to account for image embeds
-        # otherwise we expand manually by concatenating
-        if getattr(self.config, "image_token_index", None) is not None:
-            special_image_mask = (input_ids == self.config.image_token_index).unsqueeze(-1).expand_as(inputs_embeds)
-            language_model_inputs = language_model_inputs.to(inputs_embeds.device, inputs_embeds.dtype)
-            inputs_embeds = inputs_embeds.masked_scatter(special_image_mask, language_model_inputs)
-        else:
-            logger.warning_once(
-                "Expanding inputs for image tokens in BLIP-2 should be done in processing. "
-                "Please follow instruction here (https://gist.github.com/zucchini-nlp/e9f20b054fa322f84ac9311d9ab67042) to update your BLIP-2 model. "
-                "Using processors without these attributes in the config is deprecated and will throw an error in v4.50."
-            )
-            inputs_embeds = torch.cat([language_model_inputs, inputs_embeds.to(language_model_inputs.device)], dim=1)
-            attention_mask = torch.cat(
-                [language_attention_mask, attention_mask.to(language_attention_mask.device)], dim=1
-            )
+        return self.language_model.generate(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            **gen_kwargs,
+        )
 
-            # add image_embeds length to max_length, so that the final max_length in counted only on token embeds
-            # -1 is to account for the prepended BOS after `generate.`
-            # TODO (joao, raushan): refactor `generate` to avoid these operations with VLMs
-            if not self.language_model.config.is_encoder_decoder:
-                generate_kwargs["max_length"] = (
-                    generate_kwargs.get("max_length", 20) + language_model_inputs.shape[1] - 1
-                )
-                generate_kwargs["min_length"] = generate_kwargs.get("min_length", 0) + language_model_inputs.shape[1]
-
-        inputs = {"inputs_embeds": inputs_embeds, "attention_mask": attention_mask}
-        if not self.language_model.config.is_encoder_decoder:
-            inputs["input_ids"] = input_ids
-
-        outputs = self.language_model.generate(**inputs, **generate_kwargs)
-        return outputs
 
     
 
