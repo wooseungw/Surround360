@@ -2046,7 +2046,7 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         self.vision_model = Blip2VisionModel(config.vision_config)
         self.query_tokens = nn.Parameter(torch.zeros(1, config.num_query_tokens, config.qformer_config.hidden_size))
         self.qformer = Blip2QFormerModel(config.qformer_config)
-        self.language_projection = nn.Linear(config.qformer_config.hidden_size, config.text_config.hidden_size)
+        
         self.language_model = (
             AutoModelForCausalLM.from_config(config.text_config)
             if config.use_decoder_only_language_model
@@ -2088,7 +2088,7 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
 
         # merge patches dimension back (B, P*Q, D)
         q_out = q_out.view(B, P * self.config.num_query_tokens, D)
-        proj_q = self.language_projection(q_out)
+        
         lang_mask = torch.ones(proj_q.shape[:2], dtype=torch.long, device=proj_q.device)
         return proj_q, lang_mask, q_out.mean(1), vision_out  # mean pooled feat for IT losses
 
