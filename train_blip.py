@@ -55,7 +55,7 @@ class BLIP2Stage1(nn.Module):
     def __init__(self, blip2: Blip2Model):
         super().__init__()
         self.blip2 = blip2
-        hidden = blip2.config.qformer_config.hidden_size
+        hidden = blip2.config.text_config.hidden_size
         self.itm_head = nn.Linear(hidden, 2)
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
     def gradient_checkpointing_enable(self, **kwargs):
