@@ -135,7 +135,12 @@ class BLIP2Stage1(nn.Module):
         itm_labels = torch.cat([torch.ones(bs), torch.zeros(bs)]).long().to(img_emb.device)
         loss_itm = F.cross_entropy(itm_logits, itm_labels)
 
-        return loss_itc + loss_itm
+        total_loss = loss_itc + loss_itm          # (0-D Tensor)
+        return {
+        "loss": total_loss,
+        "itc_loss": loss_itc.detach(),        # 로깅용 (그래프 분리)
+        "itm_loss": loss_itm.detach(),
+        }
 # -----------------------
 # 헬퍼: Q‑Former 확장
 # -----------------------
