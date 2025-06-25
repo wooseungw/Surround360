@@ -167,7 +167,7 @@ def main(cfg):
         weight_decay=cfg.training.weight_decay,
         logging_dir=cfg.training.logging_dir,
         logging_steps=cfg.training.logging_steps,
-        evaluation_strategy=cfg.training.eval_strategy,
+        eval_strategy=cfg.training.eval_strategy,
         eval_steps=cfg.training.eval_steps,
         save_strategy=cfg.training.save_strategy,
         save_steps=cfg.training.save_steps,
