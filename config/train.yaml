@@ -1,13 +1,13 @@
 # wandb 설정
 wandb:
     project: "Surround360"
-    name: "concatqformer"
+    name: "blip2_baseline"
 
 # 모델 설정
 model:
     name: "surround"
     pretrain_name: "Salesforce/blip2-opt-2.7b" # HuggingFace 형식으로 저장된 경로
-    save_dir: "saved_models/concatqformer_add_bliploss"
+    save_dir: "saved_models/blip2_baseline"
     max_new_tokens: 32 # 최대 생성 토큰 수
     num_query_tokens: 32 # Q-Former의 쿼리 토큰 수 original: 32
     qformer:

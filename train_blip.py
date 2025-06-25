@@ -84,17 +84,28 @@ class BLIP2Stage1(nn.Module):
 # -----------------------
 
 def resize_qformer_token(model: Blip2Model, num_query_tokens: int):
-    old_tok = model.query_tokens  # (old_n, D)
+    """
+    Q-Former 쿼리 토큰 수를 늘리거나 줄입니다.
+    - 늘릴 때 : 앞 N개는 기존 가중치, 뒤는 랜덤 초기화
+    - 줄일 때 : 앞 K개(=num_query_tokens)만 잘라서 사용
+    """
+    old_tok = model.query_tokens            # (old_n, D)
     d = old_tok.size(-1)
     if num_query_tokens == old_tok.size(0):
-        return model
-    new_tok = nn.Parameter(torch.randn(num_query_tokens, d) * 0.02)
+        return model                        # 변경 없음
+
+    # 새 파라미터 생성
+    new_tok = torch.nn.Parameter(torch.randn(num_query_tokens, d) * 0.02)
+
+    # 공통 부분 복사
     with torch.no_grad():
-        new_tok[: old_tok.size(0)] = old_tok
+        copy_n = min(num_query_tokens, old_tok.size(0))
+        new_tok[:copy_n].copy_(old_tok[:copy_n])
+
+    # 교체
     model.query_tokens = new_tok
     model.config.num_query_tokens = num_query_tokens
     return model
-
 # -----------------------
 # main
 # -----------------------
