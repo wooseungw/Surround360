@@ -32,7 +32,7 @@ deepspeed:
 # 학습 설정
 training:
     train_itm: true # 훈련 ITM (Image-Text Matching) 여부
-    output_dir: "outputs/surround_360_add_vicloss3"
+    output_dir: "outputs/blip2_baseline"
     run_name: "surround_360"
     num_epochs: 8
     batch_size:
