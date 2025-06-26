@@ -37,17 +37,35 @@ def set_seed(seed: int = 42):
 # -------------------- Q‑Former token resize -------------------
 
 def resize_qformer_token(model: Blip2Model, num_q: int) -> Blip2Model:
-    """쿼리 토큰 수를 늘리거나 줄인다 (기존 가중치 보존)."""
-    old_tok: torch.Tensor = model.query_tokens            # (old, D)
-    D = old_tok.size(-1)
-    if num_q == old_tok.size(0):
+    """
+    Q-Former의 query token 수를 늘리거나 줄임.
+    (1, N, D) · (N, D) 두 가지 포맷 모두 지원.
+    """
+    old_tok: torch.Tensor = model.query_tokens         # old shape
+    old_shape = list(old_tok.shape)                    # [B?, N, D] or [N, D]
+
+    # shape 해석
+    if len(old_shape) == 3:        # (1, N, D)
+        B, old_n, D = old_shape
+        squeeze = False
+        old_tok2d = old_tok.squeeze(0)                 # (N, D)
+    else:                           # (N, D)
+        old_n, D = old_shape
+        B, squeeze = 1, True
+        old_tok2d = old_tok
+
+    # 변경 없으면 반환
+    if num_q == old_tok2d.size(0):
         return model
 
-    new_tok = nn.Parameter(torch.randn(num_q, D) * 0.02)
-    with torch.no_grad():
-        copy_n = min(num_q, old_tok.size(0))
-        new_tok[:copy_n].copy_(old_tok[:copy_n])
-    model.query_tokens = new_tok
+    # 새 토큰
+    new_tok2d = torch.randn(num_q, D, device=old_tok.device) * 0.02
+    copy_n = min(num_q, old_tok2d.size(0))
+    new_tok2d[:copy_n].copy_(old_tok2d[:copy_n])
+
+    # 차원 복원
+    new_tok = new_tok2d.unsqueeze(0) if not squeeze else new_tok2d
+    model.query_tokens = nn.Parameter(new_tok)
     model.config.num_query_tokens = num_q
     return model
 
