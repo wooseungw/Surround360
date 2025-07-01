@@ -30,6 +30,13 @@ IGNORE_INDEX = -100
 def parse_args():
     parser = argparse.ArgumentParser(description="Train BLIP-2 model with parameters from a YAML file")
     parser.add_argument("--config", type=str, default="config/train.yaml", help="Path to the config file")
+    parser.add_argument(
+        "--stage", 
+        type=int, 
+        required=True, 
+        choices=[1, 2], 
+        help="Training stage: 1 for vision pre-training, 2 for fine-tuning"
+    )
     return parser.parse_args()
 
 def load_config(config_path):
