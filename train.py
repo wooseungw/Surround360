@@ -29,7 +29,9 @@ class Stage1Trainer(Trainer):
     1단계 Vision Pre-training을 위한 커스텀 Trainer.
     모델의 forward 함수에 `pretrain_vision_only=True` 인자를 자동으로 전달합니다.
     """
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs): # **kwargs 추가
+        # 모델의 forward 함수를 호출할 때, 1단계 학습임을 알리는 플래그를 전달합니다.
+        # 데이터셋이 텍스트 관련 입력을 포함하더라도, 모델은 이를 무시하고 overlap_loss만 계산합니다.
         outputs = model(**inputs, pretrain_vision_only=True)
         loss = outputs.get("loss")
         return (loss, outputs) if return_outputs else loss
