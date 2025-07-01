@@ -22,6 +22,8 @@ from py360convert import e2p
 import numpy as np
 import torch.nn.functional as F
 
+from dataset import QuIC360Dataset, data_collator
+
 PAD_TOKEN_ID = 1
 IGNORE_INDEX = -100
 
