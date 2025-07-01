@@ -102,14 +102,16 @@ def main():
     print("train_file:", data_dir/config['data']['train_file'])
     print("valid_file:", data_dir/config['data']['valid_file'])
     train_dataset = QuIC360Dataset(
-        data_dir/config['data']['train_file'], 
-        processor, 
-        max_length=config['data']['max_length'],
-        split="train",
-        image_size=config['data']['image_size'],
-        do_crop=config['data']['do_crop'],
-        fov=config['data']['fov'],
-        overlap_ratio=config['data']['overlap_ratio']
+    data_dir / config['data']['train_file'], 
+    processor, 
+    max_length=config['data']['max_length'],
+    split="train",
+    image_size=config['data']['image_size'],
+    do_crop=config['data']['do_crop'],
+    fov=config['data']['fov'],
+    overlap_ratio=config['data']['overlap_ratio'],
+    # YAML 파일의 'data' 섹션에서 use_augmentation 값을 읽어오도록 수정
+    use_augmentation=config['data'].get('use_augmentation', False) 
     )
     print(f"Dataset length: {len(train_dataset)}")
     eval_dataset = QuIC360Dataset(
@@ -120,7 +122,8 @@ def main():
         image_size=config['data']['image_size'],
         do_crop=config['data']['do_crop'],
         fov=config['data']['fov'],
-        overlap_ratio=config['data']['overlap_ratio']
+        overlap_ratio=config['data']['overlap_ratio'],
+        use_augmentation=False # 평가 시에는 항상 증강을 끔
     )
     print(f"Dataset length: {len(eval_dataset)}")
 

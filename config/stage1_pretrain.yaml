@@ -1,0 +1,37 @@
+wandb:
+  project: "Surround360_2Stage"
+  name: "stage1-vision_pretrain"
+
+model:
+  name: "surround"
+  pretrain_name: "Salesforce/blip2-opt-2.7b" # 기본 BLIP-2 모델에서 시작
+  num_query_tokens: 32
+  qformer:
+    num_hidden_layers: 12
+  save_dir: "./checkpoints/surroundblip_stage1_vision_pretrain"
+
+data:
+  dir: "./data"
+  train_file: "train_data.csv"
+  valid_file: "valid_data.csv"
+  max_length: 512
+  image_size: [224, 224]
+  do_crop: True
+  fov: 90.0
+  overlap_ratio: 0.5
+
+training:
+  output_dir: "./checkpoints/surroundblip_stage1_vision_pretrain"
+  run_name: "stage1-vision_pretrain"
+  num_epochs: 3 # Vision Pre-training은 보통 더 짧게
+  learning_rate: 5.0e-5 # Vision Model 학습을 위한 learning rate
+  batch_size:
+    train: 8
+    eval: 8
+  gradient_accumulation_steps: 4
+  # ... 기타 설정
+  report_to: "wandb"
+
+deepspeed:
+  enabled: True
+  config: "config/ds_config_zero3.json"

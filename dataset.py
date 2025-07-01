@@ -8,11 +8,10 @@ from transformers import Blip2Processor
 from py360convert import e2p
 import numpy as np
 import torch    
+from torchvision import transforms
 
 PAD_TOKEN_ID = 1
 IGNORE_INDEX = -100
-
-
 
 class QuIC360Dataset(Dataset):
     def __init__(self, 
@@ -24,15 +23,16 @@ class QuIC360Dataset(Dataset):
                  do_crop: bool = False,
                  fov: Optional[float] = None,
                  overlap_ratio: Optional[float] = None,
-                 transform: bool = False):
+                 # --- [핵심 2] 데이터 증강을 제어하는 인자 추가 ---
+                 use_augmentation: bool = True):
         super().__init__()
         
         self.df = pd.read_csv(csv_file)
         self.processor = processor
-        
         self.max_length = max_length
         self.split = split
         self.do_crop = do_crop
+        
         if self.do_crop:
             self.image_size = (int(image_size[0] * 2), int(image_size[1] * 4))
             self.fov = fov
@@ -41,22 +41,42 @@ class QuIC360Dataset(Dataset):
         else:
             self.image_size = tuple(image_size)
             print(f"Do not Crop, Image size: {self.image_size}")
-        self.transform = transform
-        
+            
+        # --- [핵심 3] 증강 파이프라인 정의 ---
+        self.use_augmentation = use_augmentation
+        if self.use_augmentation and self.split == 'train':
+            print("Applying data augmentation (ColorJitter, GaussianBlur).")
+            # 1단계 학습을 위한 강력한 증강 설정
+            self.transform = transforms.Compose([
+                transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1),
+                transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0)),
+                # 필요에 따라 다른 증강 기법 추가 가능
+                # 예: transforms.RandomErasing(), transforms.RandomAffine(...)
+            ])
+        else:
+            # 학습 데이터가 아니거나, 증강을 사용하지 않을 경우
+            self.transform = None
+            print("Not applying data augmentation.")
         
     def __len__(self):
         return len(self.df)
     
     def __getitem__(self, idx: int) -> Dict[str, Union[torch.Tensor, str]]:
-        # 이미지 경로와 질문, 정답을 가져옵니다.
         image_path = self.df.iloc[idx]["url"]
         question = str(self.df.iloc[idx]["query"])
         answer = str(self.df.iloc[idx]["annotation"])
         
         prompt = f"Query: {question}"
         full_text = prompt + " " + "Answer: " + answer
-        # 이미지를 로드합니다.
+        
         image = Image.open(image_path).convert("RGB")
+        
+        # --- [핵심 4] 정의된 증강 파이프라인 적용 ---
+        # processor에 들어가기 전, PIL Image 상태에서 증강을 적용합니다.
+        if self.transform:
+            image = self.transform(image)
+
+        # 이미지를 로드합니다.
         inputs = self.processor(
                 images=image,
                 text=full_text,
@@ -66,15 +86,11 @@ class QuIC360Dataset(Dataset):
                 padding="max_length",
                 truncation=True,
             )
-        # qtext = f"Question: {question} Answer:"
-        # 질문과 정답을 전처리합니다.
+        
         if self.do_crop:
             inputs["pixel_values"] = self.crop_equirectangular_tensor(inputs["pixel_values"])
         
-        # 정답을 전처리합니다.
         labels = inputs.input_ids.clone()
-        # q_len = len(self.processor.tokenizer(prompt).input_ids)  # 질문+<image> token 개수
-        # labels[:, :q_len] = IGNORE_INDEX
         labels[labels == self.processor.tokenizer.pad_token_id] = IGNORE_INDEX
         
         # 디버깅 (첫 번째 샘플에 대해서만)

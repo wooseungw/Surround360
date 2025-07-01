@@ -122,7 +122,8 @@ def main():
         image_size=data_cfg['image_size'],
         do_crop=data_cfg['do_crop'],
         fov=data_cfg['fov'],
-        overlap_ratio=data_cfg['overlap_ratio']
+        overlap_ratio=data_cfg['overlap_ratio'],
+        use_augmentation = True
     )
     eval_dataset = QuIC360Dataset(
         data_dir / data_cfg['valid_file'], 
@@ -147,7 +148,7 @@ def main():
         per_device_eval_batch_size=training_cfg['batch_size']['eval'],
         gradient_accumulation_steps=training_cfg.get('gradient_accumulation_steps', 1),
         gradient_checkpointing=training_cfg.get('gradient_checkpointing', True),
-        learning_rate=float(training_cfg.get('learning_rate', 5e-5)),
+        learning_rate=float(training_cfg.get('learning_rate', 2e-5)),
         warmup_ratio=training_cfg.get('warmup_ratio', 0.03),
         weight_decay=training_cfg.get('weight_decay', 0.0),
         max_grad_norm=training_cfg.get('max_grad_norm', 1.0),
