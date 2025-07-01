@@ -2188,153 +2188,63 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         return_dict: Optional[bool] = None,
         interpolate_pos_encoding: bool = False,
         use_cache: Optional[bool] = None,
-        overlap_consistency_weight: float = 0.5,  # 일관성 손실의 가중치
+        overlap_consistency_weight: float = 0.5,
     ) -> Union[Tuple, Blip2ForConditionalGenerationModelOutput]:
-        r"""
-        Returns:
-
-        Examples:
-
-        Prepare processor, model and image input
-
-        ```python
-        >>> from PIL import Image
-        >>> import requests
-        >>> from transformers import Blip2Processor, Blip2ForConditionalGeneration
-        >>> import torch
-
-        >>> device = "cuda" if torch.cuda.is_available() else "cpu"
-
-        >>> processor = Blip2Processor.from_pretrained("Salesforce/blip2-opt-2.7b")
-        >>> model = Blip2ForConditionalGeneration.from_pretrained(
-        ...     "Salesforce/blip2-opt-2.7b", load_in_8bit=True, device_map={"": 0}, torch_dtype=torch.float16
-        ... )  # doctest: +IGNORE_RESULT
-
-        >>> url = "http://images.cocodataset.org/val2017/000000039769.jpg"
-        >>> image = Image.open(requests.get(url, stream=True).raw)
-        ```
-
-        Image captioning (without providing a text prompt):
-
-        ```python
-        >>> inputs = processor(images=image, return_tensors="pt").to(device, torch.float16)
-
-        >>> generated_ids = model.generate(**inputs)
-        >>> generated_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
-        >>> print(generated_text)
-        two cats laying on a couch
-        ```
-
-        Visual question answering (prompt = question):
-
-        ```python
-        >>> prompt = "Question: how many cats are there? Answer:"
-        >>> inputs = processor(images=image, text=prompt, return_tensors="pt").to(device="cuda", dtype=torch.float16)
-
-        >>> generated_ids = model.generate(**inputs)
-        >>> generated_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
-        >>> print(generated_text)
-        two
-        ```
-
-        Note that int8 inference is also supported through [bitsandbytes](https://github.com/TimDettmers/bitsandbytes).
-        This greatly reduces the amount of memory used by the model while maintaining the same performance.
-
-        ```python
-        >>> model = Blip2ForConditionalGeneration.from_pretrained(
-        ...     "Salesforce/blip2-opt-2.7b", load_in_8bit=True, device_map={"": 0}, torch_dtype=torch.bfloat16
-        ... )  # doctest: +IGNORE_RESULT
-
-        >>> inputs = processor(images=image, text=prompt, return_tensors="pt").to(device="cuda", dtype=torch.bfloat16)
-
-        >>> generated_ids = model.generate(**inputs)
-        >>> generated_text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
-        >>> print(generated_text)
-        two
-        ```"""
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-        # 디버깅을 위한 초기 입력값 정보 출력
-        
-        # step 0: remove patch dimensions from pixel_values
         B, P, C, H, W = pixel_values.shape
         
-        pixel_values = pixel_values.view(B * P, C, H, W)
+        # Step 0: Flatten patches for Vision Encoder
+        pixel_values_flat = pixel_values.view(B * P, C, H, W)
         
-        # step 1: forward the images through the vision encoder,
-        # to get image embeddings of shape (batch_size, seq_len, hidden_size)
+        # Step 1: Vision Encoder Forward Pass
         vision_outputs = self.vision_model(
-            pixel_values=pixel_values,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
+            pixel_values=pixel_values_flat,
+            output_hidden_states=True, # _compute_overlap_loss에서 필요
             return_dict=return_dict,
             interpolate_pos_encoding=interpolate_pos_encoding,
         )
-        BP, S, D = vision_outputs[0].shape
-        image_embeds = vision_outputs[0]
-        # 원본 (B*P, S, D) 형태의 image_embeds를 유지
-        original_image_embeds = vision_outputs[0]  # (B*P, S, D)
-        
-        # 2. 오버랩 일관성 손실(VICReg) 계산
+        image_embeds = vision_outputs[0] # (B*P, S, D)
+
+        # Step 2: Compute Overlap Consistency Loss
         overlap_loss = self._compute_overlap_loss(vision_outputs, B, P)
-        
-        # 원본 이미지 임베딩은 (B*P, S, D) 형태입니다.
-        # Q-Former로 전달하기 전에 (B, P*S, D) 형태로 변환해야 합니다.
-        # 이렇게 해야 배치 크기가 B로 유지되며 어텐션 마스크와 일관성이 유지됩니다.
-        image_embeds = original_image_embeds.reshape(B, P, S, D)  # 먼저 (B, P, S, D)로 변환
-        image_embeds = image_embeds.reshape(B * P, S, D)          # 그런 다음 (B, P*S, D)로 변환
-        
-        # 어텐션 마스크 생성 - 배치 크기 B를 유지하고, 시퀀스 길이는 P*S
-        image_attention_mask = torch.ones((B * P, S), dtype=torch.long, device=image_embeds.device)
-        
-        query_tokens = self.query_tokens.expand(image_embeds.shape[0], -1, -1)
-        
-        # 배치 차원이 일치하는지 확인
-        assert query_tokens.shape[0] == image_embeds.shape[0], "배치 차원이 일치하지 않습니다"
-        assert query_tokens.shape[0] == image_attention_mask.shape[0], "쿼리 토큰과 어텐션 마스크의 배치 차원이 일치하지 않습니다"
-        assert image_embeds.shape[0] == image_attention_mask.shape[0], "이미지 임베딩과 어텐션 마스크의 배치 차원이 일치하지 않습니다"
-        assert image_embeds.shape[1] == image_attention_mask.shape[1], "이미지 임베딩과 어텐션 마스크의 시퀀스 길이가 일치하지 않습니다"
-        
+
+        # Step 3: Prepare inputs for Q-Former (CRITICAL FIX)
+        # Reshape image embeds to (B, P*S, D) to process all patches of a panorama together
+        S, D = image_embeds.shape[1], image_embeds.shape[2]
+        image_embeds_reshaped = image_embeds.view(B, P * S, D)
+        image_attention_mask = torch.ones(image_embeds_reshaped.size()[:-1], dtype=torch.long, device=image_embeds_reshaped.device)
+
+        # Expand query tokens by batch size B, not B*P
+        query_tokens = self.query_tokens.expand(B, -1, -1)
+
+        # Step 4: Q-Former Forward Pass
         query_outputs = self.qformer(
             query_embeds=query_tokens,
-            encoder_hidden_states=image_embeds,
+            encoder_hidden_states=image_embeds_reshaped,
             encoder_attention_mask=image_attention_mask,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
-        query_output = query_outputs[0]
-        
-        query_output = query_output.view(B, P * self.config.num_query_tokens, -1)
-        # Qformer is kept in fp32, we downcast the output back if needed
-        if query_output.dtype != image_embeds.dtype:
-            query_output = query_output.to(image_embeds.dtype)
+        query_output = query_outputs[0] # Shape: (B, num_query_tokens, D)
 
-        # step 3: use the language model, conditioned on the query outputs and the prompt
+        # Step 5: Project Q-Former outputs for the language model
         language_model_inputs = self.language_projection(query_output)
         language_model_attention_mask = torch.ones(
             language_model_inputs.size()[:-1], dtype=torch.long, device=language_model_inputs.device
         )
+        
+        # Step 6: Combine with text inputs
         inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids)
 
-        # if the model already has "image_token_index" then the input is expanded to account for image embeds
-        # otherwise we expand manually by concating
-        if getattr(self.config, "image_token_index", None) is not None:
-            special_image_mask = (input_ids == self.config.image_token_index).unsqueeze(-1).expand_as(inputs_embeds)
-            language_model_inputs = language_model_inputs.to(inputs_embeds.device, inputs_embeds.dtype)
-            inputs_embeds = inputs_embeds.masked_scatter(special_image_mask, language_model_inputs)
-        else:
-            logger.warning_once(
-                "Expanding inputs for image tokens in BLIP-2 should be done in processing. "
-                "Please follow instruction here (https://gist.github.com/zucchini-nlp/e9f20b054fa322f84ac9311d9ab67042) to update your BLIP-2 model. "
-                "Using processors without these attributes in the config is deprecated and will throw an error in v4.50."
-            )
-            inputs_embeds = torch.cat([language_model_inputs, inputs_embeds.to(language_model_inputs.device)], dim=1)
-            attention_mask = torch.cat(
-                [language_model_attention_mask, attention_mask.to(language_model_attention_mask.device)], dim=1
-            )
+        inputs_embeds = torch.cat([language_model_inputs, inputs_embeds.to(language_model_inputs.device)], dim=1)
+        attention_mask = torch.cat(
+            [language_model_attention_mask, attention_mask.to(language_model_attention_mask.device)], dim=1
+        )
 
+        # Step 7: Language Model Forward Pass and Loss Calculation (CRITICAL FIX)
         if self.config.use_decoder_only_language_model:
             outputs = self.language_model(
                 inputs_embeds=inputs_embeds,
@@ -2346,49 +2256,30 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
             )
             logits = outputs.logits if return_dict else outputs[0]
             loss = None
-            # we compute the loss here since we need to take into account the sequence length of the query embeds
             if labels is not None:
-                labels = labels.to(logits.device)
-                logits = logits[:, -labels.size(1) :, :]
-                # Shift so that tokens < n predict n
+                # Correctly mask image tokens for loss calculation
+                num_image_tokens = language_model_inputs.shape[1]
+                full_labels = torch.full(logits.shape[:2], fill_value=-100, dtype=labels.dtype, device=logits.device)
+                text_len = labels.shape[1]
+                full_labels[:, num_image_tokens : num_image_tokens + text_len] = labels
+
                 shift_logits = logits[..., :-1, :].contiguous()
-                shift_labels = labels[..., 1:].contiguous().to(logits.device)
-
-                # Flatten the tokens
-                loss_fct = CrossEntropyLoss(reduction="mean")
-
-                loss = loss_fct(shift_logits.view(-1, self.config.text_config.vocab_size), shift_labels.view(-1))
-        else:
-            outputs = self.language_model(
-                inputs_embeds=inputs_embeds,
-                attention_mask=attention_mask,
-                decoder_input_ids=decoder_input_ids,
-                decoder_attention_mask=decoder_attention_mask,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-                return_dict=True,  # toggle for easier access to loss/logits below
-                labels=labels,
-                use_cache=use_cache,
-            )
+                shift_labels = full_labels[..., 1:].contiguous()
+                
+                loss_fct = CrossEntropyLoss()
+                lm_loss = loss_fct(shift_logits.view(-1, self.config.text_config.vocab_size), shift_labels.view(-1))
+                
+                # Combine two losses
+                loss = lm_loss + overlap_consistency_weight * overlap_loss
+        else: # For Encoder-Decoder models like T5
+            # This part also needs review if you plan to use it.
+            # The logic to combine inputs and labels might differ.
+            outputs = self.language_model(...)
             loss = outputs.loss
-            logits = outputs.logits
-            outputs = outputs.to_tuple() if not return_dict else outputs
-            # 기존 손실에 오버랩 일관성 손실 추가 (만약 계산되었다면)
-            if loss is not None and spatial_embeds is not None and P > 1:
-                # 패치가 여러 개이고 공간 임베딩이 계산된 경우에만 일관성 손실 추가
-                print(f"Adding overlap consistency loss (weight={overlap_consistency_weight:.3f}, value={overlap_loss:.6f})")
+            if loss is not None:
                 loss = loss + overlap_consistency_weight * overlap_loss
-            elif spatial_embeds is not None and P > 1:
-                # 언어 모델 손실이 없는 경우 일관성 손실만 사용
-                loss = overlap_consistency_weight * overlap_loss
-                
-        # 손실이 여전히 None이면 기본값 설정 (훈련에 문제가 없도록)
-        if loss is None:
-            # 학습 시 손실 계산에 문제가 있는 경우 기본값으로 0 손실 반환
-            # 이는 디버깅 목적이며, 실제 학습에서는 유의미한 손실이 계산되어야 함
-            print("Warning: Loss is None. Using dummy loss=0.0 to continue training.")
-            loss = torch.tensor(0.0, device=inputs_embeds.device)
-                
+            logits = outputs.logits
+            
         if not return_dict:
             output = (logits, vision_outputs, query_outputs, outputs)
             return ((loss,) + output) if loss is not None else output
@@ -2412,118 +2303,85 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
     ) -> torch.LongTensor:
         """
         Overrides `generate` function to be able to use the model as a conditional generator.
-
-        Args:
-            pixel_values (`torch.FloatTensor` of shape (batch_size, num_channels, height, width)):
-                Input images to be processed.
-            input_ids (`torch.LongTensor` of shape (batch_size, sequence_length), *optional*):
-                The sequence used as a prompt for the generation.
-            attention_mask (`torch.LongTensor` of shape (batch_size, sequence_length), *optional*):
-                Mask to avoid performing attention on padding token indices
-
-        Returns:
-            captions (list): A list of strings of length batch_size * num_captions.
+        (Docstring 생략)
         """
         if hasattr(self, "hf_device_map"):
             # preprocess for `accelerate`
             self._preprocess_accelerate()
 
-        # step 0: remove patch dimensions from pixel_values
+        # Step 0: 입력 텐서 shape 가져오기
         B, P, C, H, W = pixel_values.shape
-        pixel_values = pixel_values.view(B * P, C, H, W)
-        
-        # step 1: forward the images through the vision encoder
         batch_size = B
+        
+        # Step 1: Vision Encoder를 통과시키기 위해 텐서 flatten
+        pixel_values_flat = pixel_values.view(B * P, C, H, W)
+        
         vision_outputs = self.vision_model(
-            pixel_values,
+            pixel_values_flat,
             return_dict=True,
             interpolate_pos_encoding=interpolate_pos_encoding,
         )
         image_embeds = vision_outputs.last_hidden_state  # (B*P, S, D)
-        # 원본 (B*P, S, D) 형태의 image_embeds를 유지
-        original_image_embeds = vision_outputs.last_hidden_state  # (B*P, S, D)
-        
         S, D = image_embeds.shape[1], image_embeds.shape[2]
+
+        # --- [핵심 수정 1: Q-Former 입력 형태 바로잡기] ---
+        # 파노라마의 모든 패치를 하나의 시퀀스로 취급하기 위해 (B, P*S, D) 형태로 변환합니다.
+        image_embeds_reshaped = image_embeds.view(B, P * S, D)
+        image_attention_mask = torch.ones(
+            image_embeds_reshaped.size()[:-1], dtype=torch.long, device=image_embeds_reshaped.device
+        )
+
+        # query_tokens를 배치 크기 B만큼만 확장합니다.
+        query_tokens = self.query_tokens.expand(B, -1, -1)
         
-        # 원본 이미지 임베딩은 (B*P, S, D) 형태입니다.
-        # Q-Former로 전달하기 전에 동일한 형태로 처리합니다.
-        image_embeds = original_image_embeds.reshape(B, P, S, D)  # 먼저 (B, P, S, D)로 변환
-        image_embeds = image_embeds.reshape(B * P, S, D)          # 그런 다음 (B*P, S, D)로 변환
-        
-        # 어텐션 마스크 생성 - forward와 일관되게 (B * P, S) 형태로 생성
-        image_attention_mask = torch.ones((B * P, S), dtype=torch.long, device=image_embeds.device)
-        
-        query_tokens = self.query_tokens.expand(image_embeds.shape[0], -1, -1)
-        
-        # 배치 차원이 일치하는지 확인 (forward와 동일)
-        assert query_tokens.shape[0] == image_embeds.shape[0], "배치 차원이 일치하지 않습니다"
-        assert query_tokens.shape[0] == image_attention_mask.shape[0], "쿼리 토큰과 어텐션 마스크의 배치 차원이 일치하지 않습니다"
-        assert image_embeds.shape[0] == image_attention_mask.shape[0], "이미지 임베딩과 어텐션 마스크의 배치 차원이 일치하지 않습니다"
-        assert image_embeds.shape[1] == image_attention_mask.shape[1], "이미지 임베딩과 어텐션 마스크의 시퀀스 길이가 일치하지 않습니다"
+        # Step 2: Q-Former를 통과하여 이미지 피처 요약
         query_outputs = self.qformer(
             query_embeds=query_tokens,
-            encoder_hidden_states=image_embeds,
+            encoder_hidden_states=image_embeds_reshaped,
             encoder_attention_mask=image_attention_mask,
             return_dict=True,
         )
-        query_output = query_outputs.last_hidden_state
-        
-        # forward와 동일하게 query_output 처리
-        query_output = query_output.view(B, P * self.config.num_query_tokens, -1)
+        query_output = query_outputs.last_hidden_state # shape: (B, num_query_tokens, D)
+        # [수정] 불필요하고 잘못된 view 변환 로직 삭제
+        # query_output = query_output.view(B, P * self.config.num_query_tokens, -1) -> 삭제
 
-        # Qformer is kept in fp32, we downcast the output back if needed
-        if query_output.dtype != image_embeds.dtype:
-            query_output = query_output.to(image_embeds.dtype)
-
+        # Q-Former 출력을 언어 모델 입력에 맞게 프로젝션
         language_model_inputs = self.language_projection(query_output)
         language_attention_mask = torch.ones(
             language_model_inputs.size()[:-1], dtype=torch.long, device=language_model_inputs.device
         )
 
+        # Step 3: 언어 모델 입력을 위해 텍스트와 결합
         if input_ids is None:
-            start_tokens = [self.config.text_config.bos_token_id]
-            if getattr(self.config, "image_token_index", None) is not None:
-                start_tokens = [self.config.image_token_index] * self.config.num_query_tokens + start_tokens
-            input_ids = torch.tensor([start_tokens], dtype=torch.long, device=image_embeds.device)
+            # 입력 텍스트가 없으면 BOS 토큰으로 시작
+            input_ids = torch.tensor(
+                [[self.config.text_config.bos_token_id]], dtype=torch.long, device=pixel_values.device
+            )
             input_ids = input_ids.repeat(batch_size, 1)
 
-        inputs_embeds = self.get_input_embeddings()(input_ids)
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids)
 
-        # if the model already has "image_token_index" then the input is expanded to account for image embeds
-        # otherwise we expand manually by concatenating
-        if getattr(self.config, "image_token_index", None) is not None:
-            special_image_mask = (input_ids == self.config.image_token_index).unsqueeze(-1).expand_as(inputs_embeds)
-            language_model_inputs = language_model_inputs.to(inputs_embeds.device, inputs_embeds.dtype)
-            inputs_embeds = inputs_embeds.masked_scatter(special_image_mask, language_model_inputs)
-        else:
-            logger.warning_once(
-                "Expanding inputs for image tokens in BLIP-2 should be done in processing. "
-                "Please follow instruction here (https://gist.github.com/zucchini-nlp/e9f20b054fa322f84ac9311d9ab67042) to update your BLIP-2 model. "
-                "Using processors without these attributes in the config is deprecated and will throw an error in v4.50."
-            )
-            inputs_embeds = torch.cat([language_model_inputs, inputs_embeds.to(language_model_inputs.device)], dim=1)
-            attention_mask = torch.cat(
-                [language_attention_mask, attention_mask.to(language_attention_mask.device)], dim=1
-            )
+        inputs_embeds = self.get_input_embeddings()(input_ids)
+        
+        # 이미지 임베딩과 텍스트 임베딩 연결
+        inputs_embeds = torch.cat([language_model_inputs, inputs_embeds.to(language_model_inputs.device)], dim=1)
+        attention_mask = torch.cat(
+            [language_attention_mask, attention_mask.to(language_attention_mask.device)], dim=1
+        )
 
-            # add image_embeds length to max_length, so that the final max_length in counted only on token embeds
-            # -1 is to account for the prepended BOS after `generate.`
-            # TODO (joao, raushan): refactor `generate` to avoid these operations with VLMs
-            if not self.language_model.config.is_encoder_decoder:
-                generate_kwargs["max_length"] = (
-                    generate_kwargs.get("max_length", 20) + language_model_inputs.shape[1] - 1
-                )
-                generate_kwargs["min_length"] = generate_kwargs.get("min_length", 0) + language_model_inputs.shape[1]
-
+        # generate 함수에 필요한 인자들 설정
         inputs = {"inputs_embeds": inputs_embeds, "attention_mask": attention_mask}
         if not self.language_model.config.is_encoder_decoder:
-            inputs["input_ids"] = input_ids
+            inputs["input_ids"] = input_ids # for cache compatibility
+            generate_kwargs["max_length"] = (
+                generate_kwargs.get("max_length", 20) + language_model_inputs.shape[1]
+            )
 
+        # Step 4: 언어 모델을 통해 텍스트 생성
         outputs = self.language_model.generate(**inputs, **generate_kwargs)
-        return outputs
 
+        return outputs
     
 
 
