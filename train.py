@@ -2,10 +2,9 @@ import os
 import argparse
 import yaml
 from pathlib import Path
-from typing import Dict, List, Optional, Union, Any
+from typing import Dict, Optional, Union
 
 import torch
-from torch.utils.data import DataLoader, Dataset
 from transformers import (
     Blip2Processor,
     Blip2Config,
@@ -14,7 +13,6 @@ from transformers import (
 )
 from torch.nn import CrossEntropyLoss
 
-import pandas as pd
 from PIL import Image
 Image.MAX_IMAGE_PIXELS = None # 대용량 파노라마 이미지 로드를 위한 설정
 
@@ -32,8 +30,6 @@ class Stage1Trainer(Trainer):
     모델의 forward 함수에 `pretrain_vision_only=True` 인자를 자동으로 전달합니다.
     """
     def compute_loss(self, model, inputs, return_outputs=False):
-        # 모델의 forward 함수를 호출할 때, 1단계 학습임을 알리는 플래그를 전달합니다.
-        # 데이터셋이 텍스트 관련 입력을 포함하더라도, 모델은 이를 무시하고 overlap_loss만 계산합니다.
         outputs = model(**inputs, pretrain_vision_only=True)
         loss = outputs.get("loss")
         return (loss, outputs) if return_outputs else loss
@@ -43,7 +39,7 @@ def parse_args():
     """커맨드 라인 인자를 파싱합니다."""
     parser = argparse.ArgumentParser(description="Train SurroundBlip model with 2-stage strategy")
     parser.add_argument("--config", type=str, required=True, help="Path to the YAML config file")
-    # --- [핵심 2] 학습 단계를 지정하는 인자 추가 ---
+    # --- 학습 단계를 지정하는 인자 ---
     parser.add_argument("--stage", type=int, required=True, choices=[1, 2], help="Training stage: 1 for vision pre-training, 2 for fine-tuning")
     return parser.parse_args()
 
@@ -77,7 +73,8 @@ def main():
         hf_config.num_query_tokens = config['model']['num_query_tokens']
     if 'qformer' in config['model']:
         for key, value in config['model']['qformer'].items():
-            setattr(hf_config.qformer_config, key, value)
+            if hasattr(hf_config.qformer_config, key):
+                setattr(hf_config.qformer_config, key, value)
             
     model = SurroundBlip.from_pretrained(
         pretrain_name,
@@ -85,7 +82,7 @@ def main():
         ignore_mismatched_sizes=True
     )
     
-    # --- [핵심 3] 단계별 파라미터 동결/해제 로직 ---
+    # --- [핵심 2] 단계별 파라미터 동결/해제 로직 수정 ---
     if args.stage == 1:
         print("--- CONFIGURING FOR STAGE 1: VISION PRE-TRAINING ---")
         # Vision Model만 학습하도록 설정
@@ -123,7 +120,7 @@ def main():
         do_crop=data_cfg['do_crop'],
         fov=data_cfg['fov'],
         overlap_ratio=data_cfg['overlap_ratio'],
-        use_augmentation = True
+        use_augmentation=data_cfg.get('use_augmentation', False) 
     )
     eval_dataset = QuIC360Dataset(
         data_dir / data_cfg['valid_file'], 
@@ -133,7 +130,8 @@ def main():
         image_size=data_cfg['image_size'],
         do_crop=data_cfg['do_crop'],
         fov=data_cfg['fov'],
-        overlap_ratio=data_cfg['overlap_ratio']
+        overlap_ratio=data_cfg['overlap_ratio'],
+        use_augmentation=False # 평가 시에는 항상 증강을 끔
     )
     print(f"Train dataset length: {len(train_dataset)}")
     print(f"Eval dataset length: {len(eval_dataset)}")
@@ -148,7 +146,7 @@ def main():
         per_device_eval_batch_size=training_cfg['batch_size']['eval'],
         gradient_accumulation_steps=training_cfg.get('gradient_accumulation_steps', 1),
         gradient_checkpointing=training_cfg.get('gradient_checkpointing', True),
-        learning_rate=float(training_cfg.get('learning_rate', 2e-5)),
+        learning_rate=float(training_cfg.get('learning_rate', 5e-5)),
         warmup_ratio=training_cfg.get('warmup_ratio', 0.03),
         weight_decay=training_cfg.get('weight_decay', 0.0),
         max_grad_norm=training_cfg.get('max_grad_norm', 1.0),
@@ -169,9 +167,9 @@ def main():
         save_only_model=True
     )
 
-    # --- [핵심 4] 단계에 맞는 트레이너 선택 및 초기화 ---
+    # --- [핵심 3] 단계에 맞는 트레이너 선택 및 초기화 ---
     if args.stage == 1:
-        print("Initializing Stage1Trainer.")
+        print("Initializing Stage1Trainer for vision pre-training.")
         trainer = Stage1Trainer(
             model=model,
             args=training_args,
@@ -180,7 +178,7 @@ def main():
             data_collator=data_collator,
         )
     else: # stage == 2
-        print("Initializing standard Trainer for Stage 2.")
+        print("Initializing standard Trainer for fine-tuning.")
         trainer = Trainer(
             model=model,
             args=training_args,
