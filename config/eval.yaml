@@ -11,9 +11,9 @@ model:
 
 # 2. 평가 데이터 정보
 data:
-  dir: "./data"
-  test_file: "test_data.csv" # 평가에 사용할 데이터 파일
-  max_length: 512
+  dir: "./data/quic360"
+  test_file: "test.csv" # 평가에 사용할 데이터 파일
+  max_length: 32
   image_size: [224, 224]
   do_crop: True
   fov: 90.0
