@@ -36,5 +36,5 @@ training:
   report_to: "wandb"
 
 deepspeed:
-  enabled: True
+  enabled: false
   config: "config/ds_config_zero3.json"
