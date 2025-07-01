@@ -2173,8 +2173,8 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
             
         return total_loss / num_pairs
     
-    @add_start_docstrings_to_model_forward(BLIP_2_INPUTS_DOCSTRING)
-    @replace_return_docstrings(output_type=Blip2ForConditionalGenerationModelOutput, config_class=Blip2VisionConfig)
+    # @add_start_docstrings_to_model_forward(BLIP_2_INPUTS_DOCSTRING)
+    # @replace_return_docstrings(output_type=Blip2ForConditionalGenerationModelOutput, config_class=Blip2VisionConfig)
     def forward(
         self,
         pixel_values: torch.FloatTensor,
