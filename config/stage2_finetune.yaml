@@ -12,10 +12,9 @@ model:
   save_dir: "./checkpoints/surroundblip_stage2_finetune"
 
 data:
-  # 데이터 설정은 동일
-  dir: "./data"
-  train_file: "train_data.csv"
-  valid_file: "valid_data.csv"
+  dir: "./data/quic360"
+  train_file: "train.csv"
+  valid_file: "valid.csv"
   max_length: 512
   image_size: [224, 224]
   do_crop: True
@@ -30,8 +29,8 @@ training:
   num_epochs: 5
   learning_rate: 2.0e-5 # Fine-tuning을 위한 더 낮은 learning rate
   batch_size:
-    train: 4
-    eval: 4
+    train: 16
+    eval: 16
   gradient_accumulation_steps: 8
   # ... 기타 설정
   report_to: "wandb"

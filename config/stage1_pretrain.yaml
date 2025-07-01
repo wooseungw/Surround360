@@ -11,9 +11,9 @@ model:
   save_dir: "./checkpoints/surroundblip_stage1_vision_pretrain"
 
 data:
-  dir: "./data"
-  train_file: "train_data.csv"
-  valid_file: "valid_data.csv"
+  dir: "./data/quic360"
+  train_file: "train.csv"
+  valid_file: "valid.csv"
   max_length: 512
   image_size: [224, 224]
   do_crop: True
@@ -26,8 +26,8 @@ training:
   num_epochs: 3 # Vision Pre-training은 보통 더 짧게
   learning_rate: 5.0e-5 # Vision Model 학습을 위한 learning rate
   batch_size:
-    train: 8
-    eval: 8
+    train: 16
+    eval: 16
   gradient_accumulation_steps: 4
   # ... 기타 설정
   report_to: "wandb"
