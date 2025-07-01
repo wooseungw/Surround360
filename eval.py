@@ -17,7 +17,7 @@ from transformers import (
     CLIPProcessor,
     CLIPModel
 )
-from src.models.surroundblip import SurroundBlip
+from src.models.surroundblip_buffer import SurroundBlip
 
 from pycocoevalcap.bleu.bleu import Bleu
 from pycocoevalcap.meteor.meteor import Meteor

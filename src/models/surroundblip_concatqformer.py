@@ -2287,7 +2287,6 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
             num_pairs = 0
             
             # 인접 패치 쌍 찾기 (예: 파노라마인 경우 왼쪽-오른쪽 경계)
-            # 여기서는 간단한 원형 연결을 가정함
             for i in range(P):
                 next_i = (i + 1) % P  # 원형 구조를 위한 모듈로 연산
                 
@@ -2306,23 +2305,10 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
                 
                 vicreg_total_loss += border_loss
                 num_pairs += 1
-                
-                # 상하 경계도 동일하게 처리 (파노라마의 위아래 연결이 있는 경우)
-                current_bottom_border = spatial_embeds[:, i, -1, :, :]  # (B, W, D)
-                next_top_border = spatial_embeds[:, next_i, 0, :, :]  # (B, W, D)
-                
-                vertical_loss, vertical_losses = self.vicreg_loss(
-                    current_bottom_border,
-                    next_top_border,
-                    sample_ratio=overlap_consistency_weight
-                )
-                
-                vicreg_total_loss += vertical_loss
-                num_pairs += 1
-                
+        
                 # 손실 컴포넌트 누적
                 for key in vicreg_losses:
-                    vicreg_losses[key] += (border_losses[key] + vertical_losses[key]) / 2
+                    vicreg_losses[key] += (border_losses[key]) 
             
             # 패치 쌍 수로 정규화
             if num_pairs > 0:

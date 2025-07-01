@@ -21,7 +21,6 @@ from typing import Dict, List, Optional, Union, Any
 from py360convert import e2p
 import numpy as np
 import torch.nn.functional as F
-from dataset import QuIC360Dataset, data_collator
 
 PAD_TOKEN_ID = 1
 IGNORE_INDEX = -100
@@ -71,18 +70,24 @@ def main():
     else:
         print("Loading BLIP-2 model")
         model = Blip2ForConditionalGeneration.from_pretrained(pretrain_name)
-    #########################################################
     # Freeze vision encoder parameters
     # for param in model.vision_model.parameters():
     #     param.requires_grad = False
     # print("Vision model parameters have been frozen.")
-    ########################################################
     # Freeze language model parameters
     for param in model.language_model.parameters():
         param.requires_grad = False
     print("Language model parameters have been frozen.")
-    ########################################################
     
+    if config['training']['train_itm']:
+        from torch import nn
+        model.tau       = nn.Parameter(torch.tensor(1.0))                           # 대조 온도
+        hidden_size    = model.qformer.config.hidden_size
+        model.itm_head = nn.Linear(hidden_size, 2)                                 # 이미지-텍스트 매칭 헤드
+        # 3) 언어모델 파라미터는 동결 (ITC/ITM 단계에서는 generator는 건드리지 않음)
+        for p in model.language_model.parameters():
+            p.requires_grad = False
+
     # 장치 설정
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
