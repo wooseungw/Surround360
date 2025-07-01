@@ -2009,22 +2009,6 @@ class Blip2VisionModelWithProjection(Blip2PreTrainedModel):
         )
 
 
-@add_start_docstrings(
-    """
-    BLIP-2 Model for generating text given an image and an optional text prompt. The model consists of a vision
-    encoder, Querying Transformer (Q-Former) and a language model.
-
-    One can optionally pass `input_ids` to the model, which serve as a text prompt, to make the language model continue
-    the prompt. Otherwise, the language model starts generating text from the [BOS] (beginning-of-sequence) token.
-
-    <Tip>
-
-    Note that Flan-T5 checkpoints cannot be cast to float16. They are pre-trained using bfloat16.
-
-    </Tip>
-    """,
-    BLIP_2_START_DOCSTRING,
-)
 class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
     config_class = Blip2Config
     main_input_name = "pixel_values"
