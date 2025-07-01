@@ -31,7 +31,7 @@ training:
   batch_size:
     train: 16
     eval: 16
-  gradient_accumulation_steps: 8
+  gradient_accumulation_steps: 1
   # ... 기타 설정
   report_to: "wandb"
 
