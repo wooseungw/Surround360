@@ -153,7 +153,7 @@ def main():
         dataloader_num_workers=training_cfg.get('dataloader_num_workers', 4),
         logging_dir=training_cfg.get('logging_dir', './logs'),
         logging_steps=training_cfg.get('logging_steps', 10),
-        evaluation_strategy=training_cfg.get('eval_strategy', 'steps'),
+        eval_strategy=training_cfg.get('eval_strategy', 'steps'),
         eval_steps=training_cfg.get('eval_steps', 500),
         save_strategy=training_cfg.get('save_strategy', 'steps'),
         save_steps=training_cfg.get('save_steps', 500),
