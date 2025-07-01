@@ -2270,14 +2270,14 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
                 lm_loss = loss_fct(shift_logits.view(-1, self.config.text_config.vocab_size), shift_labels.view(-1))
                 
                 # Combine two losses
-                loss = lm_loss + overlap_consistency_weight * overlap_loss
+                loss = (1 - overlap_consistency_weight) * lm_loss + overlap_consistency_weight * overlap_loss
         else: # For Encoder-Decoder models like T5
             # This part also needs review if you plan to use it.
             # The logic to combine inputs and labels might differ.
             outputs = self.language_model(...)
             loss = outputs.loss
             if loss is not None:
-                loss = loss + overlap_consistency_weight * overlap_loss
+                loss = (1 - overlap_consistency_weight) * lm_loss + overlap_consistency_weight * overlap_loss
             logits = outputs.logits
             
         if not return_dict:
