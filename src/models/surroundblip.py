@@ -31,6 +31,7 @@ from transformers.modeling_outputs import (
     BaseModelOutputWithPastAndCrossAttentions,
     BaseModelOutputWithPooling,
     BaseModelOutputWithPoolingAndCrossAttentions,
+    BaseModelOutput, CausalLMOutputWithPast
 )
 from transformers.modeling_utils import PreTrainedModel
 from transformers.pytorch_utils import apply_chunking_to_forward, find_pruneable_heads_and_indices, prune_linear_layer
@@ -2172,13 +2173,22 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         loss, _ = self.vicreg_loss(left_patches_right_half, right_patches_left_half)
         return loss
 
-    # --- [핵심 수정 2] Hugging Face 표준 `prepare_inputs_for_generation` 구현 ---
-    def prepare_inputs_for_generation(self, input_ids, **kwargs):
-        # kwargs에서 vision 입력을 가져옴
+    # --- [핵심 수정 1] `prepare_inputs_for_generation`이 캐시(past_key_values)를 처리하도록 수정 ---
+    def prepare_inputs_for_generation(self, input_ids, past_key_values=None, **kwargs):
+        # `past_key_values`가 있다는 것은 이미 첫번째 forward pass가 지났다는 의미.
+        if past_key_values is not None:
+            # 두 번째 스텝부터는 텍스트 임베딩만 필요
+            return {
+                "inputs_embeds": self.get_input_embeddings()(input_ids),
+                "attention_mask": kwargs.get("attention_mask"),
+                "past_key_values": past_key_values,
+                "use_cache": kwargs.get("use_cache"),
+            }
+        
+        # 첫 번째 스텝: 비전 + 텍스트 임베딩 결합
         pixel_values = kwargs.pop("pixel_values")
         B, P, C, H, W = pixel_values.shape
         
-        # Vision Encoder와 Q-Former를 통과하여 language_model_inputs 생성
         pixel_values_flat = pixel_values.view(B * P, C, H, W)
         vision_outputs = self.vision_model(pixel_values=pixel_values_flat, return_dict=True)
         image_embeds = vision_outputs.last_hidden_state
@@ -2188,20 +2198,13 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         image_attention_mask = torch.ones(image_embeds_reshaped.size()[:-1], dtype=torch.long, device=image_embeds_reshaped.device)
 
         query_tokens = self.query_tokens.expand(B, -1, -1)
-        query_outputs = self.qformer(
-            query_embeds=query_tokens,
-            encoder_hidden_states=image_embeds_reshaped,
-            encoder_attention_mask=image_attention_mask,
-            return_dict=True,
-        )
+        query_outputs = self.qformer(query_embeds=query_tokens, encoder_hidden_states=image_embeds_reshaped, encoder_attention_mask=image_attention_mask, return_dict=True)
         query_output = query_outputs.last_hidden_state
-        language_model_inputs = self.language_projection(query_output)
         
-        # 텍스트 임베딩과 결합
+        language_model_inputs = self.language_projection(query_output)
         text_embeds = self.get_input_embeddings()(input_ids)
         inputs_embeds = torch.cat([language_model_inputs, text_embeds], dim=1)
         
-        # 새로운 attention_mask 생성
         lang_model_attention_mask = torch.ones(language_model_inputs.size()[:-1], dtype=torch.long, device=language_model_inputs.device)
         attention_mask = kwargs.get("attention_mask", torch.ones_like(input_ids))
         attention_mask = torch.cat([lang_model_attention_mask, attention_mask], dim=1)
@@ -2212,7 +2215,7 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
             "use_cache": kwargs.get("use_cache"),
         }
 
-    # --- [핵심 수정 3] forward 메서드를 학습/추론 경로 모두 지원하도록 수정 ---
+    # --- [핵심 수정 2] `forward`가 `past_key_values`를 포함한 표준 출력 형식으로 반환하도록 수정 ---
     def forward(
         self,
         pixel_values: Optional[torch.FloatTensor] = None,
@@ -2220,76 +2223,76 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         attention_mask: Optional[torch.LongTensor] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Tuple[Tuple[torch.Tensor]]] = None,
         return_dict: Optional[bool] = None,
         pretrain_vision_only: bool = False,
         overlap_consistency_weight: float = 1.0,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
-    ) -> Union[Tuple, dict]:
+        use_cache: Optional[bool] = None,
+    ) -> Union[Tuple, CausalLMOutputWithPast]:
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         # === 1단계: Vision Pre-training 경로 ===
         if pretrain_vision_only:
             B, P, C, H, W = pixel_values.shape
-            pixel_values_flat = pixel_values.view(B * P, C, H, W)
-            vision_outputs = self.vision_model(pixel_values=pixel_values_flat, output_hidden_states=True, return_dict=True)
+            vision_outputs = self.vision_model(pixel_values.view(B*P,C,H,W), output_hidden_states=True, return_dict=True)
             loss = self._compute_overlap_loss(vision_outputs, B, P) * overlap_consistency_weight
-            return {"loss": loss, "vision_outputs": vision_outputs}
+            # 1단계에서는 간단한 dict로 반환해도 무방
+            return {"loss": loss}
 
         # === 2단계 학습 및 추론(generate) 경로 ===
-        
-        # `inputs_embeds`가 주어지지 않은 경우 (학습 경로), 직접 계산
         if inputs_embeds is None:
+            # 학습 또는 첫 generate 스텝 시, 임베딩을 직접 계산
+            # (prepare_inputs_for_generation의 첫 스텝 로직과 유사)
             B, P, C, H, W = pixel_values.shape
-            pixel_values_flat = pixel_values.view(B * P, C, H, W)
+            pixel_values_flat = pixel_values.view(B*P, C, H, W)
             vision_outputs = self.vision_model(pixel_values=pixel_values_flat, return_dict=True)
             image_embeds = vision_outputs.last_hidden_state
-            
             S, D = image_embeds.shape[1], image_embeds.shape[2]
-            image_embeds_reshaped = image_embeds.view(B, P * S, D)
+            image_embeds_reshaped = image_embeds.view(B, P*S, D)
             image_attention_mask = torch.ones(image_embeds_reshaped.size()[:-1], dtype=torch.long, device=image_embeds_reshaped.device)
-            
             query_tokens = self.query_tokens.expand(B, -1, -1)
             query_outputs = self.qformer(query_embeds=query_tokens, encoder_hidden_states=image_embeds_reshaped, encoder_attention_mask=image_attention_mask, return_dict=True)
             query_output = query_outputs.last_hidden_state
-            
             language_model_inputs = self.language_projection(query_output)
             text_embeds = self.get_input_embeddings()(input_ids)
-            
             inputs_embeds = torch.cat([language_model_inputs, text_embeds], dim=1)
-            
             lang_model_attention_mask = torch.ones(language_model_inputs.size()[:-1], dtype=torch.long, device=language_model_inputs.device)
-            if attention_mask is None:
-                attention_mask = torch.ones_like(input_ids)
+            if attention_mask is None: attention_mask = torch.ones_like(input_ids)
             attention_mask = torch.cat([lang_model_attention_mask, attention_mask], dim=1)
-
+        
         # 언어 모델 통과
         outputs = self.language_model(
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
             return_dict=True,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
         )
-        logits = outputs.logits
         
         # Loss 계산 (학습 시에만)
         loss = None
         if labels is not None:
+            logits = outputs.logits
             num_image_tokens = inputs_embeds.shape[1] - input_ids.shape[1]
             full_labels = torch.full(logits.shape[:2], fill_value=-100, dtype=labels.dtype, device=logits.device)
             full_labels[:, num_image_tokens:] = labels
-            
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = full_labels[..., 1:].contiguous()
-            
             loss_fct = CrossEntropyLoss()
             loss = loss_fct(shift_logits.view(-1, self.config.text_config.vocab_size), shift_labels.view(-1))
 
-        if not return_dict:
-            return (loss, logits) if loss is not None else (logits,)
-
-        return {"loss": loss, "logits": logits, "language_model_outputs": outputs}
+        # 표준 CausalLMOutputWithPast 형식으로 반환
+        return CausalLMOutputWithPast(
+            loss=loss,
+            logits=outputs.logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
 
     
 
