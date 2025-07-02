@@ -2149,257 +2149,148 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         except RuntimeError:
             return None
 
+    # --- [핵심 수정 1] _compute_overlap_loss를 벡터화하여 효율 개선 ---
     def _compute_overlap_loss(self, vision_outputs: BaseModelOutput, B: int, P: int) -> torch.Tensor:
-        """슬라이딩 윈도우로 추출된 패치들의 겹치는 영역에 대한 VICReg 손실을 계산합니다."""
         if P <= 1:
             return torch.tensor(0.0, device=vision_outputs.last_hidden_state.device)
 
-        reshape_result = self._reshape_vision_outputs_to_spatial(vision_outputs, B, P)
-        if reshape_result is None:
-            return torch.tensor(0.0, device=vision_outputs.last_hidden_state.device)
-        
-        spatial_embeds, H, W = reshape_result
-        total_loss = 0.0
-        num_pairs = P - 1
-        
-        if num_pairs == 0:
-            return torch.tensor(0.0, device=vision_outputs.last_hidden_state.device)
-
-        for i in range(num_pairs):
-            current_patch_right_half = spatial_embeds[:, i, :, W//2:, :]
-            next_patch_left_half = spatial_embeds[:, i + 1, :, :W//2, :]
-            loss, _ = self.vicreg_loss(current_patch_right_half, next_patch_left_half)
-            total_loss += loss
-            
-        return total_loss / num_pairs
-    
-    # @add_start_docstrings_to_model_forward(BLIP_2_INPUTS_DOCSTRING)
-    # @replace_return_docstrings(output_type=Blip2ForConditionalGenerationModelOutput, config_class=Blip2VisionConfig)
-    def forward(
-        self,
-        pixel_values: torch.FloatTensor,
-        input_ids: Optional[torch.FloatTensor] = None,
-        attention_mask: Optional[torch.LongTensor] = None,
-        labels: Optional[torch.LongTensor] = None,
-        return_dict: Optional[bool] = None,
-        # --- [핵심] 학습 단계를 제어하는 플래그 ---
-        pretrain_vision_only: bool = False,
-        overlap_consistency_weight: float = 1.0,
-        # Hugging Face 기본 인자들
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        interpolate_pos_encoding: bool = False,
-        use_cache: Optional[bool] = None,
-        decoder_input_ids: Optional[torch.LongTensor] = None,
-        decoder_attention_mask: Optional[torch.LongTensor] = None,
-    ) -> Union[Tuple, Blip2ForConditionalGenerationModelOutput]:
-        """
-        이 함수의 동작은 `pretrain_vision_only` 플래그에 따라 결정됩니다.
-
-        - pretrain_vision_only=True (1단계): Vision Pre-training.
-        오직 `pixel_values`를 사용하여 `vision_model`의 공간적 일관성 손실(overlap_loss)만 계산합니다.
-        `vision_model` 학습에 사용됩니다.
-
-        - pretrain_vision_only=False (2단계): Instruction Fine-tuning.
-        `pixel_values`와 텍스트(`input_ids`, `labels`)를 모두 사용하여
-        언어 생성 손실(lm_loss)만 계산합니다.
-        Q-Former와 Language Model 학습에 사용됩니다.
-        """
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-        B, P, C, H, W = pixel_values.shape
-        
-        # --- 공통 로직: Vision Encoder 통과 ---
-        # 1/2단계 모두 vision_model을 통과하는 과정은 동일합니다.
-        pixel_values_flat = pixel_values.view(B * P, C, H, W)
-        vision_outputs = self.vision_model(
-            pixel_values=pixel_values_flat,
-            output_hidden_states=True,
-            return_dict=return_dict,
-            interpolate_pos_encoding=interpolate_pos_encoding,
-        )
-
-        # --- 학습 단계에 따른 분기 처리 ---
-        if pretrain_vision_only:
-            # =================================================
-            # === 1단계: Vision Pre-training (공간 일관성 학습) ===
-            # =================================================
-            
-            # 오직 overlap_loss만 계산하고 반환합니다.
-            overlap_loss = self._compute_overlap_loss(vision_outputs, B, P)
-            loss = overlap_consistency_weight * overlap_loss
-
-            return Blip2ForConditionalGenerationModelOutput(
-                loss=loss,
-                logits=None, # 이 단계에선 생성 안함
-                vision_outputs=vision_outputs,
-                qformer_outputs=None,
-                language_model_outputs=None,
-            )
-        else:
-            # ===================================================
-            # === 2단계: Instruction Fine-tuning (언어 생성 학습) ===
-            # ===================================================
-            
-            # 2-1: Q-Former 입력 준비
-            image_embeds = vision_outputs[0] # (B*P, S, D)
-            S, D = image_embeds.shape[1], image_embeds.shape[2]
-            
-            # 모든 패치를 하나의 시퀀스로 취급: (B, P*S, D)
-            image_embeds_reshaped = image_embeds.view(B, P * S, D)
-            image_attention_mask = torch.ones(image_embeds_reshaped.size()[:-1], dtype=torch.long, device=image_embeds_reshaped.device)
-            query_tokens = self.query_tokens.expand(B, -1, -1)
-
-            # 2-2: Q-Former 통과
-            query_outputs = self.qformer(
-                query_embeds=query_tokens,
-                encoder_hidden_states=image_embeds_reshaped,
-                encoder_attention_mask=image_attention_mask,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-                return_dict=return_dict,
-            )
-            query_output = query_outputs[0] # (B, num_query_tokens, D)
-
-            # 2-3: 언어 모델 입력 준비
-            language_model_inputs = self.language_projection(query_output)
-            
-            # 텍스트 임베딩과 결합
-            inputs_embeds = self.language_model.get_input_embeddings()(input_ids)
-            language_attention_mask = torch.ones(language_model_inputs.size()[:-1], dtype=torch.long, device=language_model_inputs.device)
-            if attention_mask is None:
-                attention_mask = torch.ones_like(input_ids)
-            attention_mask = torch.cat([language_attention_mask, attention_mask.to(language_attention_mask.device)], dim=1)
-            inputs_embeds = torch.cat([language_model_inputs, inputs_embeds.to(language_model_inputs.device)], dim=1)
-
-            # 2-4: 언어 모델 통과
-            outputs = self.language_model(
-                inputs_embeds=inputs_embeds,
-                attention_mask=attention_mask,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-                return_dict=return_dict,
-                use_cache=use_cache,
-            )
-            logits = outputs.logits
-            
-            # 2-5: 언어 모델 Loss 계산 (이미지 토큰 마스킹 적용)
-            # 이 단계에서는 오직 lm_loss만 사용합니다.
-            loss = None
-            if labels is not None:
-                num_image_tokens = language_model_inputs.shape[1]
-                full_labels = torch.full(logits.shape[:2], fill_value=-100, dtype=labels.dtype, device=logits.device)
-                text_len = labels.shape[1]
-                full_labels[:, num_image_tokens : num_image_tokens + text_len] = labels
-
-                shift_logits = logits[..., :-1, :].contiguous()
-                shift_labels = full_labels[..., 1:].contiguous()
-                
-                loss_fct = CrossEntropyLoss()
-                # lm_loss를 최종 loss로 사용
-                loss = loss_fct(shift_logits.view(-1, self.config.text_config.vocab_size), shift_labels.view(-1))
-
-            if not return_dict:
-                output = (logits, vision_outputs, query_outputs, outputs)
-                return ((loss,) + output) if loss is not None else output
-
-            return Blip2ForConditionalGenerationModelOutput(
-                loss=loss,
-                logits=logits,
-                vision_outputs=vision_outputs,
-                qformer_outputs=query_outputs,
-                language_model_outputs=outputs,
-            )
-
-    @torch.no_grad()
-    def generate(
-        self,
-        pixel_values: torch.FloatTensor,
-        input_ids: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.LongTensor] = None,
-        interpolate_pos_encoding: bool = False,
-        **generate_kwargs,
-    ) -> torch.LongTensor:
-        """
-        Overrides `generate` function to be able to use the model as a conditional generator.
-        (Docstring 생략)
-        """
-        if hasattr(self, "hf_device_map"):
-            # preprocess for `accelerate`
-            self._preprocess_accelerate()
-
-        # Step 0: 입력 텐서 shape 가져오기
-        B, P, C, H, W = pixel_values.shape
-        batch_size = B
-        
-        # Step 1: Vision Encoder를 통과시키기 위해 텐서 flatten
-        pixel_values_flat = pixel_values.view(B * P, C, H, W)
-        
-        vision_outputs = self.vision_model(
-            pixel_values_flat,
-            return_dict=True,
-            interpolate_pos_encoding=interpolate_pos_encoding,
-        )
-        image_embeds = vision_outputs.last_hidden_state  # (B*P, S, D)
+        # Vision Encoder 출력을 공간적 텐서로 변환
+        image_embeds = vision_outputs.last_hidden_state # (B*P, S, D)
         S, D = image_embeds.shape[1], image_embeds.shape[2]
-
-        # --- [핵심 수정 1: Q-Former 입력 형태 바로잡기] ---
-        # 파노라마의 모든 패치를 하나의 시퀀스로 취급하기 위해 (B, P*S, D) 형태로 변환합니다.
-        image_embeds_reshaped = image_embeds.view(B, P * S, D)
-        image_attention_mask = torch.ones(
-            image_embeds_reshaped.size()[:-1], dtype=torch.long, device=image_embeds_reshaped.device
-        )
-
-        # query_tokens를 배치 크기 B만큼만 확장합니다.
-        query_tokens = self.query_tokens.expand(B, -1, -1)
         
-        # Step 2: Q-Former를 통과하여 이미지 피처 요약
+        # CLS 토큰 여부에 따라 패치 임베딩만 선택
+        # ViT-L/14의 경우 패치 256개 + CLS 1개 = 257
+        num_patches = S - 1 if (S - 1 > 0 and (S-1)**0.5 == int((S-1)**0.5)) else S
+        H_p = W_p = int(num_patches**0.5)
+        patch_embeds = image_embeds[:, -num_patches:].view(B, P, H_p, W_p, D)
+
+        # 인접한 패치들의 겹치는 부분(좌/우 절반)을 슬라이싱
+        left_patches_right_half = patch_embeds[:, :-1, :, W_p//2:, :]
+        right_patches_left_half = patch_embeds[:, 1:, :, :W_p//2, :]
+        
+        # Loss 계산
+        loss, _ = self.vicreg_loss(left_patches_right_half, right_patches_left_half)
+        return loss
+
+    # --- [핵심 수정 2] Hugging Face 표준 `prepare_inputs_for_generation` 구현 ---
+    def prepare_inputs_for_generation(self, input_ids, **kwargs):
+        # kwargs에서 vision 입력을 가져옴
+        pixel_values = kwargs.pop("pixel_values")
+        B, P, C, H, W = pixel_values.shape
+        
+        # Vision Encoder와 Q-Former를 통과하여 language_model_inputs 생성
+        pixel_values_flat = pixel_values.view(B * P, C, H, W)
+        vision_outputs = self.vision_model(pixel_values=pixel_values_flat, return_dict=True)
+        image_embeds = vision_outputs.last_hidden_state
+        
+        S, D = image_embeds.shape[1], image_embeds.shape[2]
+        image_embeds_reshaped = image_embeds.view(B, P * S, D)
+        image_attention_mask = torch.ones(image_embeds_reshaped.size()[:-1], dtype=torch.long, device=image_embeds_reshaped.device)
+
+        query_tokens = self.query_tokens.expand(B, -1, -1)
         query_outputs = self.qformer(
             query_embeds=query_tokens,
             encoder_hidden_states=image_embeds_reshaped,
             encoder_attention_mask=image_attention_mask,
             return_dict=True,
         )
-        query_output = query_outputs.last_hidden_state # shape: (B, num_query_tokens, D)
-        # [수정] 불필요하고 잘못된 view 변환 로직 삭제
-        # query_output = query_output.view(B, P * self.config.num_query_tokens, -1) -> 삭제
-
-        # Q-Former 출력을 언어 모델 입력에 맞게 프로젝션
+        query_output = query_outputs.last_hidden_state
         language_model_inputs = self.language_projection(query_output)
-        language_attention_mask = torch.ones(
-            language_model_inputs.size()[:-1], dtype=torch.long, device=language_model_inputs.device
-        )
-
-        # Step 3: 언어 모델 입력을 위해 텍스트와 결합
-        if input_ids is None:
-            # 입력 텍스트가 없으면 BOS 토큰으로 시작
-            input_ids = torch.tensor(
-                [[self.config.text_config.bos_token_id]], dtype=torch.long, device=pixel_values.device
-            )
-            input_ids = input_ids.repeat(batch_size, 1)
-
-        if attention_mask is None:
-            attention_mask = torch.ones_like(input_ids)
-
-        inputs_embeds = self.get_input_embeddings()(input_ids)
         
-        # 이미지 임베딩과 텍스트 임베딩 연결
-        inputs_embeds = torch.cat([language_model_inputs, inputs_embeds.to(language_model_inputs.device)], dim=1)
-        attention_mask = torch.cat(
-            [language_attention_mask, attention_mask.to(language_attention_mask.device)], dim=1
+        # 텍스트 임베딩과 결합
+        text_embeds = self.get_input_embeddings()(input_ids)
+        inputs_embeds = torch.cat([language_model_inputs, text_embeds], dim=1)
+        
+        # 새로운 attention_mask 생성
+        lang_model_attention_mask = torch.ones(language_model_inputs.size()[:-1], dtype=torch.long, device=language_model_inputs.device)
+        attention_mask = kwargs.get("attention_mask", torch.ones_like(input_ids))
+        attention_mask = torch.cat([lang_model_attention_mask, attention_mask], dim=1)
+
+        return {
+            "inputs_embeds": inputs_embeds,
+            "attention_mask": attention_mask,
+            "use_cache": kwargs.get("use_cache"),
+        }
+
+    # --- [핵심 수정 3] forward 메서드를 학습/추론 경로 모두 지원하도록 수정 ---
+    def forward(
+        self,
+        pixel_values: Optional[torch.FloatTensor] = None,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.LongTensor] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        return_dict: Optional[bool] = None,
+        pretrain_vision_only: bool = False,
+        overlap_consistency_weight: float = 1.0,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+    ) -> Union[Tuple, dict]:
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        # === 1단계: Vision Pre-training 경로 ===
+        if pretrain_vision_only:
+            B, P, C, H, W = pixel_values.shape
+            pixel_values_flat = pixel_values.view(B * P, C, H, W)
+            vision_outputs = self.vision_model(pixel_values=pixel_values_flat, output_hidden_states=True, return_dict=True)
+            loss = self._compute_overlap_loss(vision_outputs, B, P) * overlap_consistency_weight
+            return {"loss": loss, "vision_outputs": vision_outputs}
+
+        # === 2단계 학습 및 추론(generate) 경로 ===
+        
+        # `inputs_embeds`가 주어지지 않은 경우 (학습 경로), 직접 계산
+        if inputs_embeds is None:
+            B, P, C, H, W = pixel_values.shape
+            pixel_values_flat = pixel_values.view(B * P, C, H, W)
+            vision_outputs = self.vision_model(pixel_values=pixel_values_flat, return_dict=True)
+            image_embeds = vision_outputs.last_hidden_state
+            
+            S, D = image_embeds.shape[1], image_embeds.shape[2]
+            image_embeds_reshaped = image_embeds.view(B, P * S, D)
+            image_attention_mask = torch.ones(image_embeds_reshaped.size()[:-1], dtype=torch.long, device=image_embeds_reshaped.device)
+            
+            query_tokens = self.query_tokens.expand(B, -1, -1)
+            query_outputs = self.qformer(query_embeds=query_tokens, encoder_hidden_states=image_embeds_reshaped, encoder_attention_mask=image_attention_mask, return_dict=True)
+            query_output = query_outputs.last_hidden_state
+            
+            language_model_inputs = self.language_projection(query_output)
+            text_embeds = self.get_input_embeddings()(input_ids)
+            
+            inputs_embeds = torch.cat([language_model_inputs, text_embeds], dim=1)
+            
+            lang_model_attention_mask = torch.ones(language_model_inputs.size()[:-1], dtype=torch.long, device=language_model_inputs.device)
+            if attention_mask is None:
+                attention_mask = torch.ones_like(input_ids)
+            attention_mask = torch.cat([lang_model_attention_mask, attention_mask], dim=1)
+
+        # 언어 모델 통과
+        outputs = self.language_model(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            return_dict=True,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
         )
+        logits = outputs.logits
+        
+        # Loss 계산 (학습 시에만)
+        loss = None
+        if labels is not None:
+            num_image_tokens = inputs_embeds.shape[1] - input_ids.shape[1]
+            full_labels = torch.full(logits.shape[:2], fill_value=-100, dtype=labels.dtype, device=logits.device)
+            full_labels[:, num_image_tokens:] = labels
+            
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = full_labels[..., 1:].contiguous()
+            
+            loss_fct = CrossEntropyLoss()
+            loss = loss_fct(shift_logits.view(-1, self.config.text_config.vocab_size), shift_labels.view(-1))
 
-        # generate 함수에 필요한 인자들 설정
-        inputs = {"inputs_embeds": inputs_embeds, "attention_mask": attention_mask}
-        if not self.language_model.config.is_encoder_decoder:
-            inputs["input_ids"] = input_ids # for cache compatibility
-            generate_kwargs["max_length"] = (
-                generate_kwargs.get("max_length", 20) + language_model_inputs.shape[1]
-            )
+        if not return_dict:
+            return (loss, logits) if loss is not None else (logits,)
 
-        # Step 4: 언어 모델을 통해 텍스트 생성
-        outputs = self.language_model.generate(**inputs, **generate_kwargs)
+        return {"loss": loss, "logits": logits, "language_model_outputs": outputs}
 
-        return outputs
     
 
 
