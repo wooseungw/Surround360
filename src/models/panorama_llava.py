@@ -41,7 +41,7 @@ class PanoramaLLaVA(PreTrainedModel):
 
         # 3. Vision -> Language 연결을 위한 MLP Projector 정의
         self.mm_projector = nn.Sequential(
-            nn.Linear(config.vision_config.projection_dim, config.mm_hidden_size), # 수정된 부분
+            nn.Linear(config.vision_config.vision_config.hidden_size, config.mm_hidden_size),
             nn.GELU(),
             nn.Linear(config.mm_hidden_size, config.language_config.hidden_size)
         )
