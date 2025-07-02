@@ -1,0 +1,52 @@
+# 모델 관련 설정
+model:
+  vision_encoder_name: "timm/vit_so400m_patch14_siglip_384.webli"
+  language_model_name: "Qwen/Qwen3-0.6B" # 또는 "google/gemma-2b-it" 등
+  mm_hidden_size: 1024 # Projector의 중간 레이어 크기
+
+# 데이터 관련 설정
+data:
+  dir: "./data/quic360"
+  train_file: "train.csv"
+  valid_file: "valid.csv"
+  max_length: 512
+  image_size: [224, 224]
+  do_crop: True
+  fov: 90.0
+  overlap_ratio: 0.5
+  use_augmentation: True         # 훈련 시 데이터 증강 사용 여부
+
+# 학습 관련 설정
+training:
+  output_dir: "./checkpoints/panorama-llava-finetune"
+  run_name: "llava-finetune-testrun"
+  num_epochs: 3
+  learning_rate: 2.0e-5
+  per_device_train_batch_size: 4
+  per_device_eval_batch_size: 4
+  gradient_accumulation_steps: 8
+  gradient_checkpointing: True
+  warmup_ratio: 0.03
+  weight_decay: 0.0
+  logging_dir: './logs'
+  logging_steps: 10
+  evaluation_strategy: "steps"
+  eval_steps: 500
+  save_strategy: "steps"
+  save_steps: 500
+  save_total_limit: 2
+  load_best_model_at_end: True
+  metric_for_best_model: 'eval_loss'
+  greater_is_better: False
+  fp16: True
+  dataloader_num_workers: 4
+
+# WandB 로깅 설정
+wandb:
+  project: "Surround360"
+  name: "lava-finetune-testrun"
+
+# DeepSpeed 사용 여부 및 설정 파일 경로
+deepspeed:
+  enabled: False
+  # config: "config/ds_config_zero3.json"

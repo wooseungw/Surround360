@@ -1,9 +1,0 @@
-model:
-  name: "test"
-  vision_model_name: "google/siglip-so400m-patch14-384"
-  llm_model_name: "Qwen/Qwen3-8B-Base"
-  projector_type: "mlp2x_gelu"
-  use_resampler: true
-  mm_spatial_pool_mode: "average"
-  freeze_vision: true
-  freeze_llm: true
