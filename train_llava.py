@@ -19,7 +19,7 @@ from transformers import (
 )
 import wandb
 
-# [가정] 아래 파일들이 올바른 경로에 위치해 있다고 가정합니다.
+# 데이터셋 및 모델 임포트
 from dataset import QuIC360Dataset, data_collator
 from src.models.panorama_llava import PanoramaLLaVA, PanoramaLLaVAConfig
 
@@ -36,6 +36,7 @@ def parse_args() -> argparse.Namespace:
     """스크립트 인자를 파싱합니다."""
     parser = argparse.ArgumentParser(description="Finetune a Panorama-LLaVA model.")
     parser.add_argument("--config", type=str, required=True, help="Path to the training configuration YAML file.")
+    parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training.")
     return parser.parse_args()
 
 def load_config(config_path: str) -> Dict[str, Any]:
@@ -50,14 +51,15 @@ def main():
     args = parse_args()
     config = load_config(args.config)
 
-    # --- 3.1. WandB 초기화 ---
+    # --- 3.1. WandB 초기화 (DDP 환경에서는 랭크 0에서만 초기화) ---
     wandb_cfg = config.get('wandb', {})
-    wandb.init(
-        project=wandb_cfg.get('project', 'PanoramaLLaVA'),
-        name=wandb_cfg.get('name', 'finetune-run'),
-        config=config  # 전체 설정을 wandb에 기록
-    )
-    logger.info("WandB initialized.")
+    if args.local_rank <= 0:  # 랭크 0 또는 비분산 환경
+        wandb.init(
+            project=wandb_cfg.get('project', 'PanoramaLLaVA'),
+            name=wandb_cfg.get('name', 'finetune-run'),
+            config=config  # 전체 설정을 wandb에 기록
+        )
+        logger.info("WandB initialized.")
 
     # --- 3.2. 프로세서 로드 ---
     model_cfg = config['model']
@@ -133,32 +135,43 @@ def main():
 
     # --- 3.6. TrainingArguments 설정 ---
     training_cfg = config['training']
+    
+    # DeepSpeed 설정 준비
+    deepspeed_cfg = config.get('deepspeed', {})
+    deepspeed_config = None
+    if deepspeed_cfg.get('enabled', False) and 'config' in deepspeed_cfg:
+        deepspeed_config = deepspeed_cfg['config']
+        logger.info(f"DeepSpeed enabled with config: {deepspeed_config}")
+    
     training_args = TrainingArguments(
-        utput_dir=training_cfg['output_dir'],
-        run_name=f"{training_cfg.get('run_name', 'run')}",
+        output_dir=training_cfg['output_dir'],
         num_train_epochs=training_cfg['num_epochs'],
-        per_device_train_batch_size=training_cfg['batch_size']['train'],
-        per_device_eval_batch_size=training_cfg['batch_size']['eval'],
+        per_device_train_batch_size=training_cfg['per_device_train_batch_size'],
+        per_device_eval_batch_size=training_cfg['per_device_eval_batch_size'],
         gradient_accumulation_steps=training_cfg.get('gradient_accumulation_steps', 1),
-        gradient_checkpointing=training_cfg.get('gradient_checkpointing', True),
-        learning_rate=float(training_cfg.get('learning_rate', 5e-5)),
-        warmup_ratio=training_cfg.get('warmup_ratio', 0.03),
-        weight_decay=training_cfg.get('weight_decay', 0.0),
-        max_grad_norm=training_cfg.get('max_grad_norm', 1.0),
-        dataloader_num_workers=training_cfg.get('dataloader_num_workers', 4),
-        logging_dir=training_cfg.get('logging_dir', './logs'),
-        logging_steps=training_cfg.get('logging_steps', 10),
+        learning_rate=training_cfg['learning_rate'],
+        warmup_ratio=training_cfg['warmup_ratio'],
+        weight_decay=training_cfg['weight_decay'],
+        logging_dir=training_cfg['logging_dir'],
+        logging_steps=training_cfg['logging_steps'],
         eval_strategy=training_cfg.get('eval_strategy', 'steps'),
         eval_steps=training_cfg.get('eval_steps', 500),
         save_strategy=training_cfg.get('save_strategy', 'steps'),
         save_steps=training_cfg.get('save_steps', 500),
-        save_total_limit=training_cfg.get('save_total_limit', 2),
+        save_total_limit=training_cfg.get('save_total_limit', 3),
+        
+        # 추가 설정
+        run_name=training_cfg.get('run_name', 'llava-finetune-run'),
+        gradient_checkpointing=training_cfg.get('gradient_checkpointing', True),
+        fp16=training_cfg.get('fp16', False),
         load_best_model_at_end=training_cfg.get('load_best_model_at_end', True),
         metric_for_best_model=training_cfg.get('metric_for_best_model', 'eval_loss'),
         greater_is_better=training_cfg.get('greater_is_better', False),
-        fp16=training_cfg.get('fp16', True),
-        deepspeed=config.get('deepspeed', {}).get('config') if config.get('deepspeed', {}).get('enabled') else None,
-        report_to=training_cfg.get('report_to', 'wandb'),
+        dataloader_num_workers=training_cfg.get('dataloader_num_workers', 4),
+        deepspeed=deepspeed_config,
+        local_rank=args.local_rank,
+        fp16=training_cfg.get('fp16', False),  # fp16 훈련 옵션 추가
+        deepspeed=training_cfg.get('deepspeed', None)  # DeepSpeed 지원 추가
     )
 
     # --- 3.7. Trainer 초기화 및 학습 실행 ---
@@ -176,12 +189,14 @@ def main():
     
     # --- 3.8. 최종 모델 저장 ---
     save_dir = Path(training_cfg['output_dir'])
-    logger.info(f"Saving final model to {save_dir}...")
-    trainer.save_model(str(save_dir))
-    processor.save_pretrained(save_dir)
-    logger.info("Model and processor saved successfully.")
     
-    wandb.finish()
+    # 분산 학습 환경에서는 랭크 0에서만 최종 저장
+    if args.local_rank <= 0:
+        logger.info(f"Saving final model to {save_dir}...")
+        trainer.save_model(str(save_dir))
+        processor.save_pretrained(save_dir)
+        logger.info("Model and processor saved successfully.")
+        wandb.finish()
 
 if __name__ == "__main__":
     main()

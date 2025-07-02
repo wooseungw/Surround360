@@ -22,15 +22,15 @@ training:
   run_name: "llava-finetune-testrun"
   num_epochs: 3
   learning_rate: 2.0e-5
-  per_device_train_batch_size: 4
-  per_device_eval_batch_size: 4
-  gradient_accumulation_steps: 8
+  per_device_train_batch_size: 16
+  per_device_eval_batch_size: 16
+  gradient_accumulation_steps: 1
   gradient_checkpointing: True
   warmup_ratio: 0.03
   weight_decay: 0.0
   logging_dir: './logs'
   logging_steps: 10
-  evaluation_strategy: "steps"
+  eval_strategy: "steps"
   eval_steps: 500
   save_strategy: "steps"
   save_steps: 500
