@@ -133,3 +133,8 @@ class PanoramaLLaVA(PreTrainedModel):
             attention_mask=attention_mask,
             **generate_kwargs
         )
+        
+    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs={}):
+        # 부모의 일반적인 방법 대신, 구체적인 지시를 내림
+        self.vision_tower.gradient_checkpointing_enable(gradient_checkpointing_kwargs)
+        self.language_model.gradient_checkpointing_enable(gradient_checkpointing_kwargs)
