@@ -15,7 +15,8 @@ from transformers import (
     Trainer,
     CLIPVisionConfig,
     AutoModel,
-    AutoModelForCausalLM
+    AutoModelForCausalLM,
+    AutoImageProcessor, AutoTokenizer, Blip2Processor, Blip2Config
 )
 import wandb
 
@@ -63,24 +64,38 @@ def main():
 
     # --- 3.2. 프로세서 로드 ---
     model_cfg = config['model']
-    processor = AutoProcessor.from_pretrained(model_cfg['language_model_name'], use_fast=False)
-    if processor.pad_token is None:
-        processor.pad_token = processor.eos_token
-        logger.info("Processor pad_token is set to eos_token.")
+    vision_encoder_name = model_cfg['vision_encoder_name']
+    language_model_name = model_cfg['language_model_name']
 
+    # 1. Vision Encoder에 맞는 Image Processor 로드
+    image_processor = AutoImageProcessor.from_pretrained(vision_encoder_name)
+    
+    # 2. Language Model에 맞는 Tokenizer 로드
+    tokenizer = AutoTokenizer.from_pretrained(language_model_name)
+    
+    # 3. Blip2Processor를 사용하여 두 컴포넌트를 하나로 합칩니다.
+    #    (이름은 Blip2Processor지만, 범용적으로 사용 가능합니다)
+    processor = Blip2Processor(image_processor=image_processor, tokenizer=tokenizer)
+    # LLaMA, Gemma 등 BOS/EOS 기반 모델을 위한 PAD 토큰 설정
+    if processor.tokenizer.pad_token is None:
+        processor.tokenizer.pad_token = processor.tokenizer.eos_token
+    logger.info("Vision-Language Processor created successfully.")
+    
     # --- 3.3. 모델 구성 및 가중치 로드 ---
     logger.info("Building PanoramaLLaVA model...")
-    vision_config = CLIPVisionConfig.from_pretrained(model_cfg['vision_encoder_name'])
-    language_config = AutoConfig.from_pretrained(model_cfg['language_model_name'])
+    hf_config = CLIPVisionConfig.from_pretrained(vision_encoder_name) # 비전 config를 기본으로 사용 가능
+    language_config = AutoConfig.from_pretrained(language_model_name)
     
     model_config = PanoramaLLaVAConfig(
-        vision_config=vision_config,
+        vision_config=hf_config.vision_config, # Blip2Config에서 vision_config 추출
         language_config=language_config,
         mm_hidden_size=model_cfg.get('mm_hidden_size', 512)
     )
 
-    # 1) 아키텍처(뼈대) 생성
     model = PanoramaLLaVA(model_config)
+    model.vision_tower = AutoModel.from_pretrained(vision_encoder_name)
+    model.language_model = AutoModelForCausalLM.from_pretrained(language_model_name)
+    
     
     # 2) 각 부분에 사전학습된 가중치 채워넣기
     logger.info(f"Loading weights from vision_tower: {model_cfg['vision_encoder_name']}")

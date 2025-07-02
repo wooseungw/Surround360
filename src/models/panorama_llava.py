@@ -13,6 +13,7 @@ class PanoramaLLaVAConfig(PretrainedConfig):
     Vision Encoder와 Language Model의 설정을 포함합니다.
     """
     model_type = "panorama_llava"
+    main_input_name = "pixel_values"
 
     def __init__(
         self,
