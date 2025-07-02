@@ -135,7 +135,7 @@ def main():
     training_cfg = config['training']
     training_args = TrainingArguments(
         utput_dir=training_cfg['output_dir'],
-        run_name=f"{training_cfg.get('run_name', 'run')}_stage{args.stage}",
+        run_name=f"{training_cfg.get('run_name', 'run')}",
         num_train_epochs=training_cfg['num_epochs'],
         per_device_train_batch_size=training_cfg['batch_size']['train'],
         per_device_eval_batch_size=training_cfg['batch_size']['eval'],

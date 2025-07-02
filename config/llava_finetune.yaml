@@ -1,5 +1,4 @@
 # 모델 관련 설정
-stage: "none"  # "pretrain" 또는 "finetune"
 model:
   vision_encoder_name: "google/siglip-base-patch16-224"
   language_model_name: "Qwen/Qwen3-0.6B" # 또는 "google/gemma-2b-it" 등
