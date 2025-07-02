@@ -168,10 +168,10 @@ def main():
         metric_for_best_model=training_cfg.get('metric_for_best_model', 'eval_loss'),
         greater_is_better=training_cfg.get('greater_is_better', False),
         dataloader_num_workers=training_cfg.get('dataloader_num_workers', 4),
-        deepspeed=deepspeed_config,
+        
         local_rank=args.local_rank,
         fp16 = training_cfg.get('fp16', False),  # fp16 훈련 옵션 추가
-        deepspeed=training_cfg.get('deepspeed', None)  # DeepSpeed 지원 추가
+        
     )
 
     # --- 3.7. Trainer 초기화 및 학습 실행 ---
