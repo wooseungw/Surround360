@@ -83,11 +83,12 @@ def main():
     
     # --- 3.3. 모델 구성 및 가중치 로드 ---
     logger.info("Building PanoramaLLaVA model...")
-    hf_config = CLIPVisionConfig.from_pretrained(vision_encoder_name) # 비전 config를 기본으로 사용 가능
+    vision_config = AutoConfig.from_pretrained(vision_encoder_name)
     language_config = AutoConfig.from_pretrained(language_model_name)
     
+    # 2. PanoramaLLaVAConfig를 생성할 때, 로드한 config 객체를 그대로 전달합니다.
     model_config = PanoramaLLaVAConfig(
-        vision_config=hf_config.vision_config, # Blip2Config에서 vision_config 추출
+        vision_config=vision_config,       # hf_config.vision_config -> vision_config 로 수정
         language_config=language_config,
         mm_hidden_size=model_cfg.get('mm_hidden_size', 512)
     )
