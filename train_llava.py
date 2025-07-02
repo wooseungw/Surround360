@@ -170,8 +170,7 @@ def main():
         dataloader_num_workers=training_cfg.get('dataloader_num_workers', 4),
         
         local_rank=args.local_rank,
-        fp16 = training_cfg.get('fp16', False),  # fp16 훈련 옵션 추가
-        
+        deepspeed = deepspeed_config if deepspeed_config else None  # DeepSpeed 지원 추가
     )
 
     # --- 3.7. Trainer 초기화 및 학습 실행 ---
