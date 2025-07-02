@@ -134,21 +134,23 @@ def main():
     # --- 3.6. TrainingArguments 설정 ---
     training_cfg = config['training']
     training_args = TrainingArguments(
-        output_dir=training_cfg['output_dir'],
-        run_name=wandb.run.name, # wandb 실행 이름과 동기화
-        num_train_epochs=training_cfg.get('num_epochs', 3),
-        per_device_train_batch_size=training_cfg.get('per_device_train_batch_size', 4),
-        per_device_eval_batch_size=training_cfg.get('per_device_eval_batch_size', 4),
+        utput_dir=training_cfg['output_dir'],
+        run_name=f"{training_cfg.get('run_name', 'run')}_stage{args.stage}",
+        num_train_epochs=training_cfg['num_epochs'],
+        per_device_train_batch_size=training_cfg['batch_size']['train'],
+        per_device_eval_batch_size=training_cfg['batch_size']['eval'],
         gradient_accumulation_steps=training_cfg.get('gradient_accumulation_steps', 1),
         gradient_checkpointing=training_cfg.get('gradient_checkpointing', True),
-        learning_rate=float(training_cfg.get('learning_rate', 2e-5)),
+        learning_rate=float(training_cfg.get('learning_rate', 5e-5)),
         warmup_ratio=training_cfg.get('warmup_ratio', 0.03),
         weight_decay=training_cfg.get('weight_decay', 0.0),
+        max_grad_norm=training_cfg.get('max_grad_norm', 1.0),
+        dataloader_num_workers=training_cfg.get('dataloader_num_workers', 4),
         logging_dir=training_cfg.get('logging_dir', './logs'),
         logging_steps=training_cfg.get('logging_steps', 10),
-        evaluation_strategy=training_cfg.get('evaluation_strategy', "steps"),
+        eval_strategy=training_cfg.get('eval_strategy', 'steps'),
         eval_steps=training_cfg.get('eval_steps', 500),
-        save_strategy=training_cfg.get('save_strategy', "steps"),
+        save_strategy=training_cfg.get('save_strategy', 'steps'),
         save_steps=training_cfg.get('save_steps', 500),
         save_total_limit=training_cfg.get('save_total_limit', 2),
         load_best_model_at_end=training_cfg.get('load_best_model_at_end', True),
@@ -156,8 +158,7 @@ def main():
         greater_is_better=training_cfg.get('greater_is_better', False),
         fp16=training_cfg.get('fp16', True),
         deepspeed=config.get('deepspeed', {}).get('config') if config.get('deepspeed', {}).get('enabled') else None,
-        report_to="wandb",
-        save_only_model=True,
+        report_to=training_cfg.get('report_to', 'wandb'),
     )
 
     # --- 3.7. Trainer 초기화 및 학습 실행 ---
