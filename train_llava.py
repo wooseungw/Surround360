@@ -16,7 +16,7 @@ from transformers import (
     CLIPVisionConfig,
     AutoModel,
     AutoModelForCausalLM,
-    AutoImageProcessor, AutoTokenizer, Blip2Processor, Blip2Config
+    AutoImageProcessor, AutoTokenizer, LlavaNextProcessor, Blip2Config
 )
 import wandb
 
@@ -75,7 +75,7 @@ def main():
     
     # 3. Blip2Processor를 사용하여 두 컴포넌트를 하나로 합칩니다.
     #    (이름은 Blip2Processor지만, 범용적으로 사용 가능합니다)
-    processor = Blip2Processor(image_processor=image_processor, tokenizer=tokenizer)
+    processor = LlavaNextProcessor(image_processor=image_processor, tokenizer=tokenizer)
     # LLaMA, Gemma 등 BOS/EOS 기반 모델을 위한 PAD 토큰 설정
     if processor.tokenizer.pad_token is None:
         processor.tokenizer.pad_token = processor.tokenizer.eos_token
