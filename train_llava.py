@@ -108,19 +108,26 @@ def main():
     
     logger.info(f"Loading train dataset from: {data_dir/data_cfg['train_file']}")
     train_dataset = QuIC360Dataset(
-        csv_file=os.path.join(data_dir, data_cfg['train_file']),
-        processor=processor,
+        data_dir / data_cfg['train_file'], 
+        processor, 
+        max_length=data_cfg['max_length'],
         split="train",
-        **data_cfg
+        image_size=data_cfg['image_size'],
+        do_crop=data_cfg['do_crop'],
+        fov=data_cfg['fov'],
+        overlap_ratio=data_cfg['overlap_ratio'],
+        use_augmentation=data_cfg.get('use_augmentation', False) 
     )
-    
-    logger.info(f"Loading validation dataset from: {data_dir/data_cfg['valid_file']}")
     eval_dataset = QuIC360Dataset(
-        csv_file=os.path.join(data_dir, data_cfg['valid_file']),
-        processor=processor,
+        data_dir / data_cfg['valid_file'], 
+        processor, 
+        max_length=data_cfg['max_length'],
         split="valid",
-        use_augmentation=False,  # 평가 시에는 증강을 끔
-        **data_cfg
+        image_size=data_cfg['image_size'],
+        do_crop=data_cfg['do_crop'],
+        fov=data_cfg['fov'],
+        overlap_ratio=data_cfg['overlap_ratio'],
+        use_augmentation=False # 평가 시에는 항상 증강을 끔
     )
     logger.info(f"Train dataset size: {len(train_dataset)}, Validation dataset size: {len(eval_dataset)}")
 

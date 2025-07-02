@@ -1,7 +1,7 @@
 # 모델 관련 설정
 model:
-  vision_encoder_name: "timm/vit_so400m_patch14_siglip_384.webli"
-  language_model_name: "Qwen/Qwen3-0.6B" # 또는 "google/gemma-2b-it" 등
+  vision_encoder_name: "google/siglip-base-patch16-224"
+  language_model_name: "google/gemma-3-1b-it" # 또는 "google/gemma-2b-it" 등
   mm_hidden_size: 1024 # Projector의 중간 레이어 크기
 
 # 데이터 관련 설정
