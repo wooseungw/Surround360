@@ -21,7 +21,7 @@ data:
 
 # 3. 생성(Inference) 관련 설정
 generate:
-  max_length: 128   # 생성할 문장의 최대 길이
+  max_length: 64   # 생성할 문장의 최대 길이
   num_beams: 5      # 빔 서치(Beam Search) 크기
 
 # 4. 평가 관련 설정
@@ -37,6 +37,7 @@ eval:
     - "SPICE"
     - "CLIP-S"
     - "RefCLIP-S"
+  
 
 # 5. 결과 파일 저장 경로
 output:
