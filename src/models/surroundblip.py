@@ -59,6 +59,10 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         if self.language_model._tied_weights_keys is not None:
             self._tied_weights_keys = [f"language_model.{k}" for k in self.language_model._tied_weights_keys]
         self.post_init()
+        
+        # --- [해결책 2] 누락되었던 get_input_embeddings 메서드 추가 ---
+    def get_input_embeddings(self) -> nn.Module:
+        return self.language_model.get_input_embeddings()
 
     # _compute_overlap_loss 메서드는 이전과 동일
     def _compute_overlap_loss(self, vision_outputs: BaseModelOutput, B: int, P: int) -> torch.Tensor:
@@ -84,6 +88,19 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
             total_loss += loss
             
         return total_loss / num_pairs
+    # --- [해결책 1] 누락되었던 _reshape_vision_outputs_to_spatial 메서드 추가 ---
+    def _reshape_vision_outputs_to_spatial(self, vision_outputs: BaseModelOutput, B: int, P: int) -> Optional[Tuple[torch.Tensor, int, int]]:
+        image_embeds = vision_outputs.last_hidden_state
+        S, D = image_embeds.shape[1], image_embeds.shape[2]
+        try:
+            num_patches = S - 1 if (S > 1 and (S-1)**0.5 == int((S-1)**0.5)) else S
+            if num_patches <= 0: return None
+            H_p = W_p = int(num_patches**0.5)
+            patch_embeds = image_embeds[:, -num_patches:]
+            spatial_embeds = patch_embeds.view(B, P, H_p, W_p, D)
+            return spatial_embeds, H_p, W_p
+        except (RuntimeError, ValueError):
+            return None
         
     # [핵심 2] `prepare_inputs_for_generation` 메서드는 generate의 헬퍼 역할
     def prepare_inputs_for_generation(self, input_ids, past_key_values=None, **kwargs):
@@ -95,28 +112,16 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
                 "past_key_values": past_key_values,
             }
         
-        # 첫 번째 스텝: 비전 처리를 포함하여 `inputs_embeds`를 만듦
         pixel_values = kwargs.pop("pixel_values")
         B, P, C, H, W = pixel_values.shape
-        pixel_values_flat = pixel_values.view(B * P, C, H, W)
-        vision_outputs = self.vision_model(pixel_values=pixel_values_flat)
-        image_embeds = vision_outputs.last_hidden_state
-        
-        S, D = image_embeds.shape[1], image_embeds.shape[2]
-        image_embeds_reshaped = image_embeds.view(B, P * S, D)
-        image_attention_mask = torch.ones(image_embeds_reshaped.size()[:-1], dtype=torch.long, device=image_embeds_reshaped.device)
-
-        query_tokens = self.query_tokens.expand(B, -1, -1)
-        query_outputs = self.qformer(query_embeds=query_tokens, encoder_hidden_states=image_embeds_reshaped, encoder_attention_mask=image_attention_mask)
+        vision_outputs = self.vision_model(pixel_values=pixel_values.view(B*P, C, H, W))
+        query_outputs = self.qformer(encoder_hidden_states=vision_outputs.last_hidden_state.view(B, P * vision_outputs.last_hidden_state.shape[1], -1))
         language_model_inputs = self.language_projection(query_outputs.last_hidden_state)
-        
         text_embeds = self.get_input_embeddings()(input_ids)
         inputs_embeds = torch.cat([language_model_inputs, text_embeds], dim=1)
-        
         lang_attn_mask = torch.ones(language_model_inputs.size()[:-1], dtype=torch.long, device=inputs_embeds.device)
         attn_mask = kwargs.get("attention_mask", torch.ones_like(input_ids))
         attention_mask = torch.cat([lang_attn_mask, attn_mask], dim=1)
-
         return {"inputs_embeds": inputs_embeds, "attention_mask": attention_mask}
 
     # [핵심 3] `forward`는 분기 로직을 가지면서, 2단계/추론 시 표준 출력을 반환
