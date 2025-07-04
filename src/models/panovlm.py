@@ -1,5 +1,5 @@
 from typing import Optional, Union, Tuple, Any, Dict, List
-from transformers import PretrainedConfig, AutoConfig, AutoModel, PreTrainedModel, AutoModelForCausalLM
+from transformers import PretrainedConfig, AutoConfig, AutoModel, PreTrainedModel, AutoModelForCausalLM, AutoModelForVisualQuestionAnswering
 import transformers
 import torch
 import torch.nn as nn
