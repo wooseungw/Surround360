@@ -234,7 +234,7 @@ class Evaluator:
             csv_file=csv_path,
             processor=self.processor,
             split='eval', # 'train'이 아니므로 평가 모드로 동작
-            max_new_tokens=data_cfg.get("max_new_tokens", 128),
+            max_length=data_cfg.get("max_length", 128),
             image_size=data_cfg.get("image_size", [224, 224]),
             do_crop=data_cfg.get("do_crop", False),
             fov=data_cfg.get("fov", 90.0),
