@@ -66,10 +66,12 @@ class QuIC360Dataset(Dataset):
         question = str(self.df.iloc[idx]["query"])
         answer = str(self.df.iloc[idx]["annotation"])
         
-        prompt = f"Query: {question}"
-        full_text = prompt + " " + "Answer: " + answer
-        
-        image = Image.open(image_path).convert("RGB")
+        # [수정] 평가 시에는 정답을 제외한 프롬프트만 모델에 제공
+        if self.split == 'train':
+            text_to_process = f"Query: {question}###Answer: {answer}"
+        else: # 'eval', 'test' 등
+            text_to_process = f"Query: {question}###Answer:"
+
         
         # --- [핵심 4] 정의된 증강 파이프라인 적용 ---
         # processor에 들어가기 전, PIL Image 상태에서 증강을 적용합니다.
@@ -79,7 +81,7 @@ class QuIC360Dataset(Dataset):
         # 이미지를 로드합니다.
         inputs = self.processor(
                 images=image,
-                text=full_text,
+                text=text_to_process,
                 size=self.image_size,
                 return_tensors="pt",
                 max_length=self.max_length,

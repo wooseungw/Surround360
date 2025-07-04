@@ -23,7 +23,7 @@ class PanoVLMConfig(PretrainedConfig):
     model_type = "panovlm"
 
     def __init__(self, 
-                 vision_model_name_or_path: str = "facebook/dinov2-small",
+                 vision_model_name_or_path: str = "google/siglip2-base-patch16-224",
                  language_model_name_or_path: str = "google/gemma-3-4b-it",
                  vision_config=None,
                  language_config=None,

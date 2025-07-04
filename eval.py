@@ -4,8 +4,10 @@ import json
 import yaml
 import logging
 from tqdm import tqdm
+from typing import Dict, List, Any, Union, Optional
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from PIL import Image
 Image.MAX_IMAGE_PIXELS = None
@@ -17,7 +19,7 @@ from transformers import (
     CLIPProcessor,
     CLIPModel
 )
-from src.models.surroundblip import SurroundBlip
+from torchvision import transforms # QuIC360Dataset에서 사용
 
 from pycocoevalcap.bleu.bleu import Bleu
 from pycocoevalcap.meteor.meteor import Meteor
@@ -26,13 +28,14 @@ from pycocoevalcap.cider.cider import Cider
 from pycocoevalcap.spice.spice import Spice
 
 import pandas as pd
-from py360convert import e2p
 import numpy as np
-from typing import Dict, List, Optional, Any
+from py360convert import e2p
 
-# -----------------------------------------------------------------------------------
-# 1) 로깅 설정
-# -----------------------------------------------------------------------------------
+from src.models.surroundblip import SurroundBlip
+
+# ==============================================================================
+# 로깅 설정
+# ==============================================================================
 logger = logging.getLogger(__name__)
 logging.basicConfig(
     level=logging.INFO,
@@ -40,542 +43,336 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 
-# -----------------------------------------------------------------------------------
-# 2) 구성 파일 로드 및 검증
-# -----------------------------------------------------------------------------------
+# ==============================================================================
+# 유틸리티 함수
+# ==============================================================================
+
 def load_config(path: str) -> Dict[str, Any]:
-    """
-    YAML 형식의 설정 파일을 안전하게 로드하고, 필수 키가 존재하는지 검증한다.
-    """
     if not os.path.isfile(path):
         raise FileNotFoundError(f"설정 파일을 찾을 수 없습니다: {path}")
     with open(path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
-
-    # 필수 키 검증
-    required_keys = [
-        ("model", "name"),
-        ("model", "pretrain_path"),
-        ("data", "dir"),
-        ("data", "test_file"),
-        ("generate", "max_length"),
-        ("generate", "num_beams"),
-        ("output", "result_file"),
-        ("eval", "batch_size"),
-        ("eval", "num_workers")
-    ]
-    for section, key in required_keys:
-        if section not in cfg or key not in cfg[section]:
-            raise KeyError(f"config 파일에 '{section}.{key}' 설정이 누락되었습니다.")
     return cfg
 
-# -----------------------------------------------------------------------------------
-# 3) 데이터셋 정의
-# -----------------------------------------------------------------------------------
-class EvalDataset(Dataset):
-    """
-    CSV 파일에 기록된 샘플 단위로 이미지 경로, 질의(query), 정답(annotation) 정보를 읽어들여
-    BLIP-2 Processor에 맞게 전처리하고, 필요 시 큐브맵 크롭을 수행한 후,
-    배치 추론 단계에서 사용할 딕셔너리 형태로 반환한다.
-    """
-    def __init__(
-        self,
-        csv_file: str,
-        processor: Blip2Processor,
-        image_size: List[int] = [224, 224],
-        max_length: Optional[int] = None,
-        do_crop: bool = False,
-        fov: Optional[float] = None,
-        overlap_ratio: Optional[float] = None
-    ):
-        super().__init__()
-        if not os.path.isfile(csv_file):
-            raise FileNotFoundError(f"CSV 파일을 찾을 수 없습니다: {csv_file}")
-        self.df = pd.read_csv(csv_file)
-        self.processor = processor
-        self.max_length = max_length
-        self.do_crop = do_crop
-        self.overlap_ratio = overlap_ratio
-
-        if self.do_crop:
-            # 파노라마 이미지를 2배 x 4배 해상도로 조정 (equirectangular 크롭용)
-            self.image_size = (int(image_size[0] * 2), int(image_size[1] * 4))
-            self.fov = fov
-            logger.info(f"[데이터셋] 크롭 사용, 이미지 사이즈: {self.image_size}")
-        else:
-            self.image_size = tuple(image_size)
-            logger.info(f"[데이터셋] 크롭 미사용, 이미지 사이즈: {self.image_size}")
-
-    def __len__(self) -> int:
-        return len(self.df)
-
-    def __getitem__(self, idx: int) -> Dict[str, Any]:
-        row = self.df.iloc[idx]
-        img_path = str(row["url"])
-        query = str(row["query"])
-        ann = str(row["annotation"])  # 문자열로 변환
-
-        # 이미지 로딩 예외 처리
-        try:
-            image = Image.open(img_path).convert("RGB")
-        except Exception as e:
-            logger.error(f"이미지 로딩 실패: {img_path} | 오류: {e}")
-            # 실패한 샘플은 검정색 배경 이미지로 대체
-            image = Image.new("RGB", self.image_size, (0, 0, 0))
-
-        # BLIP-2 Processor 전처리
-        inputs = self.processor(
-            text=query,
-            images=image,
-            return_tensors="pt",
-            padding="max_length",
-            truncation=True,
-            max_length=self.max_length
-        )
-
-        # 파노라마 크롭이 필요한 경우
-        if self.do_crop:
-            inputs["pixel_values"] = self.crop_equirectangular_tensor(inputs["pixel_values"])
-
-        pixel_values = inputs.pixel_values.squeeze(0)     # [3, H, W] 또는 [N, C, H, W] (크롭 시)
-        input_ids = inputs.input_ids.squeeze(0)           # [L]
-        attention_mask = inputs.attention_mask.squeeze(0) # [L]
-
-        return {
-            "pixel_values": pixel_values,
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "url": img_path,
-            "query": query,
-            "annotation": ann
-        }
-
-    def crop_equirectangular_tensor(self, img_tensor: torch.Tensor) -> torch.Tensor:
-        """
-        equirectangular 이미지(1 x C x H2 x W4)에서 지정된 FOV, overlap 비율을 기반으로
-        여러 패치를 크롭하여 리턴한다. (N x C x H x W 포맷)
-        """
-        B, C, H2, W4 = img_tensor.shape
-        assert B == 1, "batch 차원이 1이어야만 equirectangular 크롭이 가능합니다."
-        H, W = H2 // 2, W4 // 4
-
-        # (1) stride 각도 계산
-        step = self.fov * (1.0 - self.overlap_ratio)
-        # (2) 필요한 패치 개수 (360도 전체를 커버)
-        num_patches = int(np.ceil(360.0 / step))
-        # (3) yaw 중심 각 생성 (0 ~ 360 step 간격)
-        yaw_centers = (np.arange(num_patches) * step) % 360.0
-        # (4) e2p 함수 입력 범위로 변환 (-180 ~ 180)
-        yaw_centers = np.where(yaw_centers > 180.0, yaw_centers - 360.0, yaw_centers)
-        # (5) numpy array로 변환 (H2 x W4 x C)
-        img_np = img_tensor[0].permute(1, 2, 0).cpu().numpy()
-
-        patches = []
-        for u_deg in yaw_centers:
-            pers = e2p(
-                img_np,
-                fov_deg=self.fov,
-                u_deg=float(u_deg),
-                v_deg=0.0,
-                out_hw=(H, W),
-                in_rot_deg=0.0,
-                mode="bilinear",
-            )  # 반환: (H, W, C)
-            t = torch.from_numpy(pers).permute(2, 0, 1)  # (C, H, W)
-            patches.append(t)
-
-        # (N, C, H, W) 형태로 병합 후, 모델 입력에 맞추기 위해 배치 차원 삽입
-        stacked = torch.stack(patches, dim=0)    # (N, C, H, W)
-        return stacked.unsqueeze(0)               # (1, N, C, H, W)
-
-# -----------------------------------------------------------------------------------
-# 4) 모델 및 프로세서 로드
-# -----------------------------------------------------------------------------------
 def get_model_and_processor(cfg: Dict[str, Any], device: torch.device):
-    """
-    설정 파일(cfg)을 참조하여, BLIP-2 또는 SurroundBlip 모델과 Processor를 생성 후 반환한다.
-    """
-    model_name    = cfg["model"]["name"]
+    model_name = cfg["model"]["name"]
     pretrain_path = cfg["model"]["pretrain_path"]
-
-    # Processor 로드
-    try:
-        processor = Blip2Processor.from_pretrained(pretrain_path)
-    except Exception as e:
-        raise RuntimeError(f"Processor 로드 실패: {pretrain_path} | 오류: {e}")
-
-    # 모델 로드 (Surround 또는 기본 BLIP-2 분기)
+    processor = Blip2Processor.from_pretrained(pretrain_path)
     if model_name.lower() == "surround":
-        logger.info("[모델] SurroundBlip 로딩 시도")
-        try:
-            hf_config = Blip2Config.from_pretrained(pretrain_path)
-            # 사용자 정의 num_query_tokens 오버라이드
-            if "num_query_tokens" in cfg["model"]:
-                hf_config.num_query_tokens = cfg["model"]["num_query_tokens"]
-            # Q-Former 관련 설정 오버라이드
-            if "qformer" in cfg["model"]:
-                for key, value in cfg["model"]["qformer"].items():
-                    if hasattr(hf_config.qformer_config, key):
-                        setattr(hf_config.qformer_config, key, value)
-            model = SurroundBlip.from_pretrained(
-                pretrain_path,
-                config=hf_config,
-                ignore_mismatched_sizes=True
-            )
-        except Exception as e:
-            raise RuntimeError(f"SurroundBlip 모델 로드 실패: {pretrain_path} | 오류: {e}")
+        hf_config = Blip2Config.from_pretrained(pretrain_path)
+        model = SurroundBlip.from_pretrained(pretrain_path, config=hf_config, ignore_mismatched_sizes=True)
     else:
-        logger.info("[모델] BLIP-2 로딩 시도")
-        try:
-            model = Blip2ForConditionalGeneration.from_pretrained(pretrain_path)
-        except Exception as e:
-            raise RuntimeError(f"BLIP-2 모델 로드 실패: {pretrain_path} | 오류: {e}")
-
+        model = Blip2ForConditionalGeneration.from_pretrained(pretrain_path)
     model.to(device)
     model.eval()
-    logger.info(f"[모델] '{model_name}' 로딩 완료, 디바이스: {device}")
     return processor, model
 
-# -----------------------------------------------------------------------------------
-# 5) 배치 단위 캡션 생성 함수
-# -----------------------------------------------------------------------------------
-def generate_captions(
-    model: torch.nn.Module,
-    processor: Blip2Processor,
-    dataloader: DataLoader,
-    gen_args: Dict[str, Any],
-    device: torch.device
-):
-    """
-    dataloader로부터 배치를 받아 모델로부터 예측 캡션을 생성하고,
-    references, hypotheses, details를 리스트로 반환한다.
-    """
-    references:   List[List[str]]      = []
-    hypotheses:   List[str]            = []
-    details:      List[Dict[str, Any]] = []
-
-    for batch in tqdm(dataloader, desc="Evaluating"):
-        pv = batch["pixel_values"]
-        ids = batch["input_ids"]
-        mask = batch["attention_mask"]
-
-        # 모델 입력을 적절히 디바이스로 이동
-        pv   = pv.to(device)
-        ids  = ids.to(device)
-        mask = mask.to(device)
-
-        # 생성(Inference) 단계
-        with torch.no_grad():
-            try:
-                gen_ids = model.generate(
-                    pixel_values=pv,
-                    input_ids=ids,
-                    attention_mask=mask,
-                    **gen_args
-                )
-            except Exception as e:
-                logger.error(f"캡션 생성 중 오류 발생: {e}")
-                batch_size = ids.size(0)
-                gen_ids = torch.zeros((batch_size, 1), dtype=torch.long).to(device)
-
-        # token ID → 문자열 디코딩
-        preds = processor.batch_decode(gen_ids, skip_special_tokens=True)
-
-        # 결과 축적
-        for url, query, ref, pred in zip(batch["url"], batch["query"], batch["annotation"], preds):
-            references.append([ref])
-            hypotheses.append(pred.strip())
-            details.append({
-                "url":        url,
-                "query":      query,
-                "reference":  ref,
-                "hypothesis": pred.strip()
-            })
-
-    return references, hypotheses, details
-
-# -----------------------------------------------------------------------------------
-# 6) COCO-evalcap 지표 초기화 및 계산
-# -----------------------------------------------------------------------------------
-def get_scorers(metric_names: List[str]):
-    """
-    사용자 정의 metric_names 리스트에서 COCO-evalcap 계열 지표 객체만 생성하여 반환한다.
-    CLIP-S, RefCLIP-S는 후처리 단계에서 별도로 계산한다.
-    """
-    scorers = []
-    for m in metric_names:
-        m_lower = m.lower()
-        if m_lower.startswith("bleu"):
-            scorers.append((Bleu(4), ["Bleu_1", "Bleu_2", "Bleu_3", "Bleu_4"]))
-        elif m_lower == "meteor":
-            scorers.append((Meteor(), "METEOR"))
-        elif m_lower in ["rouge", "rouge-l"]:
-            scorers.append((Rouge(), "ROUGE_L"))
-        elif m_lower == "cider":
-            scorers.append((Cider(), "CIDEr"))
-        elif m_lower == "spice":
-            scorers.append((Spice(), "SPICE"))
-        else:
-            logger.info(f"get_scorers: '{m}' 은 COCO-evalcap 지표가 아니므로 건너뜁니다.")
-    return scorers
-
-def compute_scores(
-    scorers: List[Any],
-    references: List[List[str]],
-    hypotheses: List[str]
-) -> Dict[str, float]:
-    """
-    COCO-evalcap 형식 scorers를 이용하여, 전체 지표를 계산하고 'overall' 딕셔너리 형태로 반환한다.
-    """
-    gts = {i: references[i] for i in range(len(references))}
-    res = {i: [hypotheses[i]] for i in range(len(hypotheses))}
-
-    overall = {}
-    for scorer, name in scorers:
-        try:
-            score, _ = scorer.compute_score(gts, res)
-        except Exception as e:
-            logger.error(f"{scorer.__class__.__name__} 지표 계산 중 오류 발생: {e}")
-            continue
-
-        if isinstance(name, list):
-            for n, s in zip(name, score):
-                overall[n] = float(s)
-        else:
-            overall[name] = float(score)
-
-    return overall
-
-# -----------------------------------------------------------------------------------
-# 7) CLIP 모델 로딩 및 지표 계산 함수
-# -----------------------------------------------------------------------------------
-def get_clip_models(device: torch.device):
-    """
-    Hugging Face 허브에서 CLIP 모델과 프로세서를 로드하여 반환한다.
-    """
-    clip_model_name = "openai/clip-vit-base-patch32"
-    clip_processor  = CLIPProcessor.from_pretrained(clip_model_name)
-    clip_model      = CLIPModel.from_pretrained(clip_model_name).to(device)
+def get_clip_models(model_name: str, device: torch.device):
+    clip_processor = CLIPProcessor.from_pretrained(model_name)
+    clip_model = CLIPModel.from_pretrained(model_name).to(device)
     clip_model.eval()
     return clip_model, clip_processor
 
-def compute_clip_s(
-    details: List[Dict[str, Any]],
-    clip_model: CLIPModel,
-    clip_processor: CLIPProcessor,
-    device: torch.device
-) -> float:
-    """
-    details 리스트(각 원소에 'url'과 'hypothesis' 포함)를 순회하며,
-    이미지와 생성문장 간 CLIP 유사도를 계산하여 평균을 반환한다.
-    """
-    similarities = []
+# ==============================================================================
+# [변경] QuIC360Dataset 및 개선된 Data Collator
+# ==============================================================================
 
-    with torch.no_grad():
-        for sample in tqdm(details, desc="Calculating CLIP-S"):
-            # 1) 이미지 로딩
-            try:
-                image = Image.open(sample["url"]).convert("RGB")
-            except Exception:
-                # 이미지 로딩 실패 시 유사도 0으로 처리
-                similarities.append(0.0)
-                continue
+IGNORE_INDEX = -100
 
-            # 2) CLIP 프로세서로 전처리
-            inputs = clip_processor(
-                text=sample["hypothesis"],
-                images=image,
-                return_tensors="pt",
-                padding=True
-            ).to(device)
+class QuIC360Dataset(Dataset):
+    def __init__(self, 
+                 csv_file: str,
+                 processor: Blip2Processor,
+                 image_size: list = [224, 224],
+                 max_length: Optional[int] = 128,
+                 split: str = "train",
+                 do_crop: bool = False,
+                 fov: Optional[float] = 90.0,
+                 overlap_ratio: Optional[float] = 0.5,
+                 use_augmentation: bool = False): # 평가는 항상 False
+        super().__init__()
+        
+        self.df = pd.read_csv(csv_file)
+        self.processor = processor
+        self.max_length = max_length
+        self.split = split
+        self.do_crop = do_crop
+        
+        if self.do_crop:
+            self.image_size = (int(image_size[0] * 2), int(image_size[1] * 4))
+            self.fov = fov
+            self.overlap_ratio = overlap_ratio
+        else:
+            self.image_size = tuple(image_size)
 
-            # 3) CLIP 모델에 입력하여 텍스트/이미지 임베딩 얻기
-            outputs = clip_model(**inputs)
-            img_emb  = outputs.image_embeds      # (1, D)
-            txt_emb  = outputs.text_embeds       # (1, D)
+        self.use_augmentation = use_augmentation
+        if self.use_augmentation and self.split == 'train':
+            logger.info("데이터 증강 적용 (ColorJitter, GaussianBlur).")
+            self.transform = transforms.Compose([
+                transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1),
+                transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0)),
+            ])
+        else:
+            self.transform = None
 
-            # 4) L2 정규화 후 코사인 유사도 계산
-            img_emb_norm = img_emb / img_emb.norm(p=2, dim=-1, keepdim=True)
-            txt_emb_norm = txt_emb / txt_emb.norm(p=2, dim=-1, keepdim=True)
-            sim = (img_emb_norm * txt_emb_norm).sum(dim=-1).item()  # 스칼라
-            similarities.append(sim)
+    def __len__(self):
+        return len(self.df)
+    
+    def __getitem__(self, idx: int) -> Dict[str, Union[torch.Tensor, str]]:
+        row = self.df.iloc[idx]
+        image_path = row["url"]
+        question = str(row["query"])
+        answer = str(row["annotation"])
+        
+        try:
+            image = Image.open(image_path).convert("RGB")
+        except Exception as e:
+            logger.warning(f"이미지 로딩 실패: {image_path} | {e}. 검정 이미지로 대체합니다.")
+            image = Image.new("RGB", self.image_size, (0, 0, 0))
+        
+        if self.transform:
+            image = self.transform(image)
 
-    if len(similarities) == 0:
-        return 0.0
-    return float(np.mean(similarities))
+        # [수정] 평가 시에는 정답을 제외한 프롬프트만 모델에 제공
+        if self.split == 'train':
+            text_to_process = f"Query: {question} Answer: {answer}"
+        else: # 'eval', 'test' 등
+            text_to_process = f"Query: {question} Answer:"
 
-def compute_refclip_s(
-    details: List[Dict[str, Any]],
-    clip_model: CLIPModel,
-    clip_processor: CLIPProcessor,
-    device: torch.device
-) -> float:
-    """
-    details 리스트(각 원소에 'hypothesis'와 'reference' 포함)를 순회하며,
-    생성문장과 정답문장 간 CLIP 텍스트 임베딩 기반 유사도를 계산하여 평균 반환.
-    """
-    text_sims = []
+        inputs = self.processor(
+            images=image, text=text_to_process, return_tensors="pt",
+            max_length=self.max_length, padding="max_length", truncation=True,
+        )
+        
+        if self.do_crop:
+            inputs["pixel_values"] = self.crop_equirectangular_tensor(inputs["pixel_values"])
+        
+        # 학습 시에만 필요한 레이블
+        labels = inputs.input_ids.clone()
+        labels[labels == self.processor.tokenizer.pad_token_id] = IGNORE_INDEX
+        
+        return {
+            "pixel_values": inputs["pixel_values"].squeeze(0),
+            "input_ids": inputs["input_ids"].squeeze(0),
+            "attention_mask": inputs["attention_mask"].squeeze(0),
+            "labels": labels.squeeze(0), # 평가 시 사용되진 않음
+            "image_path": image_path,
+            "question": question,
+            "answer": answer
+        }
 
-    with torch.no_grad():
-        for sample in tqdm(details, desc="Calculating RefCLIP-S"):
-            # 텍스트만 전처리 (두 문장을 한 번에 배치 처리)
-            inputs = clip_processor(
-                text=[sample["hypothesis"], sample["reference"]],
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=77  # CLIP 최대 토큰 길이
-            ).to(device)
+    def crop_equirectangular_tensor(self, img_tensor: torch.Tensor) -> torch.Tensor:
+        B, C, H2, W4 = img_tensor.shape
+        assert B == 1
+        H, W = H2 // 2, W4 // 4
+        step = self.fov * (1.0 - self.overlap_ratio)
+        num_patches = int(np.ceil(360.0 / step))
+        yaw_centers = (np.arange(num_patches) * step) % 360.0
+        yaw_centers = np.where(yaw_centers > 180.0, yaw_centers - 360.0, yaw_centers)
+        img_np = img_tensor[0].permute(1, 2, 0).cpu().numpy()
+        patches = [
+            torch.from_numpy(
+                e2p(img_np, fov_deg=self.fov, u_deg=float(u), v_deg=0.0, out_hw=(H, W), mode="bilinear")
+            ).permute(2, 0, 1) for u in yaw_centers
+        ]
+        return torch.stack(patches, dim=0).unsqueeze(0)
 
-            # 두 문장 텍스트 임베딩 획득
-            text_features = clip_model.get_text_features(**inputs)  # (2, D)
-            h_emb = text_features[0].unsqueeze(0)  # (1, D)
-            r_emb = text_features[1].unsqueeze(0)  # (1, D)
+def data_collator(features: List[Dict]) -> Dict[str, Any]:
+    """[개선] Blip2/VLM을 위한 안정적인 데이터 콜레이터"""
+    if not features: return {}
+    
+    first = features[0]
+    batch = {}
+    
+    # Tensor 필드 처리 (pixel_values는 텐서 리스트일 수 있음)
+    if "pixel_values" in first:
+        batch["pixel_values"] = torch.stack([f["pixel_values"] for f in features])
 
-            # L2 정규화 후 코사인 유사도 계산
-            h_norm = h_emb / h_emb.norm(p=2, dim=-1, keepdim=True)
-            r_norm = r_emb / r_emb.norm(p=2, dim=-1, keepdim=True)
-            sim = (h_norm * r_norm).sum(dim=-1).item()
-            text_sims.append(sim)
+    # Tokenizer를 이용한 텍스트 관련 필드 패딩
+    text_keys = ["input_ids", "attention_mask", "labels"]
+    text_features = [{k: v for k, v in f.items() if k in text_keys} for f in features]
+    
+    # Blip2Processor의 tokenizer는 LlamaTokenizer 등을 기반으로 함
+    # 이 tokenizer의 pad 메서드를 사용하여 올바른 패딩을 적용
+    processor = features[0]['processor'] # 데이터셋에서 프로세서를 가져올 수 있도록 수정 필요
+                                         # 또는 콜레이터 초기화 시 프로세서 전달
+    # 임시방편: 전역 processor 변수 사용
+    padded_batch = Blip2Processor.from_pretrained("Salesforce/blip2-opt-2.7b").tokenizer.pad(
+        text_features, padding=True, return_tensors="pt"
+    )
+    batch.update(padded_batch)
 
-    if len(text_sims) == 0:
-        return 0.0
-    return float(np.mean(text_sims))
+    # 문자열 필드 처리
+    str_keys = ["image_path", "question", "answer"]
+    for key in str_keys:
+        if key in first:
+            batch[key] = [f[key] for f in features]
+            
+    return batch
 
-# -----------------------------------------------------------------------------------
-# 8) 결과 저장
-# -----------------------------------------------------------------------------------
-def save_results(
-    overall: Dict[str, float],
-    details: List[Dict[str, Any]],
-    output_path: str
-):
-    """
-    overall 지표와 샘플별 상세 정보를 JSON으로 저장한다.
-    """
-    out = {
-        "overall": overall,
-        "details": details
-    }
+
+# ==============================================================================
+# [변경] Evaluator 클래스: QuIC360Dataset을 사용하도록 수정
+# ==============================================================================
+
+class Evaluator:
+    def __init__(self, config_path: str):
+        self.cfg = load_config(config_path)
+        self.device = torch.device(self.cfg.get("device", "cuda" if torch.cuda.is_available() else "cpu"))
+        self.model, self.processor, self.clip_model, self.clip_processor, self.dataloader = [None] * 5
+        logger.info(f"[Evaluator] 초기화 완료, 디바이스: {self.device}")
+
+    def setup(self):
+        """평가에 필요한 모든 컴포넌트를 설정합니다."""
+        self.processor, self.model = get_model_and_processor(self.cfg, self.device)
+
+        data_cfg = self.cfg["data"]
+        csv_path = os.path.join(data_cfg["dir"], data_cfg["test_file"])
+        
+        # [변경] QuIC360Dataset 사용
+        dataset = QuIC360Dataset(
+            csv_file=csv_path,
+            processor=self.processor,
+            split='eval', # 'train'이 아니므로 평가 모드로 동작
+            max_length=data_cfg.get("max_length", 128),
+            image_size=data_cfg.get("image_size", [224, 224]),
+            do_crop=data_cfg.get("do_crop", False),
+            fov=data_cfg.get("fov", 90.0),
+            overlap_ratio=data_cfg.get("overlap_ratio", 0.5),
+            use_augmentation=False # 평가 시 증강 비활성화
+        )
+        
+        # [변경] 개선된 data_collator를 사용하기 위해 collate_fn 지정
+        # 참고: 올바른 패딩을 위해 tokenizer를 콜레이터에 전달하는 것이 가장 이상적입니다.
+        # 여기서는 Blip2Processor의 기본 pad_token_id가 0임을 가정하고 간단히 구현합니다.
+        def robust_collator(features: List[Dict]) -> Dict:
+            batch = {}
+            keys = features[0].keys()
+            for key in keys:
+                if isinstance(features[0][key], torch.Tensor):
+                    batch[key] = torch.stack([f[key] for f in features])
+                else:
+                    batch[key] = [f[key] for f in features]
+            return batch
+            
+        self.dataloader = DataLoader(
+            dataset, batch_size=self.cfg["eval"]["batch_size"],
+            num_workers=self.cfg["eval"]["num_workers"], shuffle=False,
+            pin_memory=True
+            # collate_fn=robust_collator # tokenizer.pad를 사용하는 것이 더 안정적
+        )
+
+        metric_names = [m.lower() for m in self.cfg["eval"].get("metrics", [])]
+        if "clip-s" in metric_names or "refclip-s" in metric_names:
+            clip_model_name = self.cfg["eval"].get("clip_model_name", "openai/clip-vit-base-patch32")
+            self.clip_model, self.clip_processor = get_clip_models(clip_model_name, self.device)
+
+    def run(self):
+        """전체 평가 파이프라인을 실행합니다."""
+        self.setup()
+        gen_args = self.cfg["generate"]
+        references, hypotheses, details = self._generate_captions(gen_args)
+        overall_scores = self._calculate_all_metrics(references, hypotheses, details)
+        save_results(overall_scores, details, self.cfg["output"]["result_file"])
+
+    def _generate_captions(self, gen_args: Dict[str, Any]) -> tuple:
+        """배치 단위로 캡션을 생성합니다."""
+        references, hypotheses, details = [], [], []
+        for batch in tqdm(self.dataloader, desc="Generating Captions"):
+            for key in ["pixel_values", "input_ids", "attention_mask"]:
+                batch[key] = batch[key].to(self.device)
+
+            with torch.no_grad():
+                # [변경] VQA 형식이므로, prompt를 포함한 input_ids를 전달해야 함
+                gen_ids = self.model.generate(
+                    pixel_values=batch["pixel_values"],
+                    input_ids=batch["input_ids"],
+                    attention_mask=batch["attention_mask"],
+                    **gen_args
+                )
+            
+            # 생성된 텍스트에서 프롬프트 부분은 제외
+            preds = self.processor.batch_decode(gen_ids, skip_special_tokens=True)
+
+            # [변경] 데이터 키 변경: url->image_path, query->question, annotation->answer
+            for path, q, ref, pred in zip(batch["image_path"], batch["question"], batch["answer"], preds):
+                references.append([ref])
+                hypotheses.append(pred.strip())
+                details.append({"url": path, "query": q, "reference": ref, "hypothesis": pred.strip()})
+        return references, hypotheses, details
+
+    # 이하 _calculate_all_metrics, _get_scorers 등 다른 메서드들은 이전과 동일하게 유지 ...
+    def _calculate_all_metrics(self, references: List, hypotheses: List, details: List) -> Dict:
+        metric_names = [m.lower() for m in self.cfg["eval"]["metrics"]]
+        batch_size = self.cfg["eval"].get("clip_batch_size", 32)
+        scorers = self._get_scorers(metric_names)
+        overall = self._compute_coco_scores(scorers, references, hypotheses)
+        if "clip-s" in metric_names:
+            overall["CLIP-S"] = self._compute_clip_s_batched(details, batch_size)
+        if "refclip-s" in metric_names:
+            overall["RefCLIP-S"] = self._compute_refclip_s_batched(details, batch_size)
+        return overall
+
+    def _get_scorers(self, metric_names: List[str]):
+        SCORER_MAP = {"bleu": (Bleu(4), ["Bleu_1", "Bleu_2", "Bleu_3", "Bleu_4"]), "meteor": (Meteor(), "METEOR"), "rouge": (Rouge(), "ROUGE_L"), "cider": (Cider(), "CIDEr"), "spice": (Spice(), "SPICE")}
+        scorers = []
+        for name in metric_names:
+            key = name.split('-')[0].lower()
+            if key in SCORER_MAP: scorers.append(SCORER_MAP[key])
+        return scorers
+
+    def _compute_coco_scores(self, scorers, references, hypotheses):
+        gts = {i: refs for i, refs in enumerate(references)}
+        res = {i: [hypo] for i, hypo in enumerate(hypotheses)}
+        overall = {}
+        for scorer, name in scorers:
+            score, _ = scorer.compute_score(gts, res)
+            if isinstance(name, list):
+                for n, s in zip(name, score): overall[n] = float(s)
+            else: overall[name] = float(score)
+        return overall
+
+    def _compute_clip_s_batched(self, details: List, batch_size: int) -> float:
+        image_paths = [s["url"] for s in details]
+        hypotheses = [s["hypothesis"] for s in details]
+        similarities = []
+        with torch.no_grad():
+            for i in tqdm(range(0, len(details), batch_size), desc="Calculating CLIP-S (Batched)"):
+                batch_paths, batch_texts = image_paths[i:i+batch_size], hypotheses[i:i+batch_size]
+                images = [Image.open(p).convert("RGB") if os.path.exists(p) else Image.new("RGB", (224, 224)) for p in batch_paths]
+                inputs = self.clip_processor(text=batch_texts, images=images, return_tensors="pt", padding=True, truncation=True, max_length=77).to(self.device)
+                outputs = self.clip_model(**inputs)
+                similarities.extend(F.cosine_similarity(outputs.image_embeds, outputs.text_embeds).cpu().tolist())
+        return float(np.mean(similarities)) if similarities else 0.0
+
+    def _compute_refclip_s_batched(self, details: List, batch_size: int) -> float:
+        hypotheses = [s["hypothesis"] for s in details]
+        references = [s["reference"] for s in details]
+        text_sims = []
+        with torch.no_grad():
+            for i in tqdm(range(0, len(details), batch_size), desc="Calculating RefCLIP-S (Batched)"):
+                batch_hypo, batch_ref = hypotheses[i:i+batch_size], references[i:i+batch_size]
+                inputs_hypo = self.clip_processor(text=batch_hypo, return_tensors="pt", padding=True, truncation=True, max_length=77).to(self.device)
+                inputs_ref = self.clip_processor(text=batch_ref, return_tensors="pt", padding=True, truncation=True, max_length=77).to(self.device)
+                hypo_embeds, ref_embeds = self.clip_model.get_text_features(**inputs_hypo), self.clip_model.get_text_features(**inputs_ref)
+                text_sims.extend(F.cosine_similarity(hypo_embeds, ref_embeds).cpu().tolist())
+        return float(np.mean(text_sims)) if text_sims else 0.0
+
+def save_results(overall: Dict, details: List, output_path: str):
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    try:
-        with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(out, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        raise IOError(f"결과 저장 실패: {output_path} | 오류: {e}")
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump({"overall": overall, "details": details}, f, ensure_ascii=False, indent=2)
     logger.info(f"▶ 평가 완료. 결과가 저장되었습니다: {output_path}")
 
-# -----------------------------------------------------------------------------------
-# 9) 메인 함수
-# -----------------------------------------------------------------------------------
 def main():
-    # 1) 인자 파싱
-    parser = argparse.ArgumentParser(description="Evaluate BLIP-2 모델")
-    parser.add_argument(
-        "--config", type=str, required=True,
-        help="평가용 YAML 파일 경로 (예: config/eval.yaml)"
-    )
+    parser = argparse.ArgumentParser(description="Evaluate Vision-Language Models")
+    parser.add_argument("--config", type=str, required=True, help="평가용 YAML 파일 경로")
     args = parser.parse_args()
-
-    # 2) 구성 파일 로드 및 검증
     try:
-        cfg = load_config(args.config)
+        evaluator = Evaluator(config_path=args.config)
+        evaluator.run()
     except Exception as e:
-        logger.error(f"config 로드 오류: {e}")
-        return
-
-    # 3) 디바이스 설정
-    device = torch.device(
-        cfg.get("device", "cuda" if torch.cuda.is_available() else "cpu")
-    )
-    logger.info(f"[디바이스] {device}")
-
-    # 4) 모델 및 프로세서 로드
-    try:
-        processor, model = get_model_and_processor(cfg, device)
-    except Exception as e:
-        logger.error(f"모델/프로세서 로드 오류: {e}")
-        return
-
-    # 5) 데이터셋 및 DataLoader 준비
-    data_dir  = cfg["data"]["dir"]
-    test_file = cfg["data"]["test_file"]
-    csv_path  = os.path.join(data_dir, test_file)
-
-    try:
-        dataset = EvalDataset(
-            csv_file=csv_path,
-            processor=processor,
-            max_length=cfg["data"].get("max_length", None),
-            image_size=cfg["data"].get("image_size", [224, 224]),
-            do_crop=cfg["data"].get("do_crop", False),
-            fov=cfg["data"].get("fov", None),
-            overlap_ratio=cfg["data"].get("overlap_ratio", None)
-        )
-    except Exception as e:
-        logger.error(f"데이터셋 초기화 오류: {e}")
-        return
-
-    dataloader = DataLoader(
-        dataset,
-        batch_size=cfg["eval"]["batch_size"],
-        num_workers=cfg["eval"]["num_workers"],
-        shuffle=False,
-        pin_memory=True
-    )
-
-    # 6) 생성 파라미터
-    gen_args = {
-        "max_new_tokens": cfg["generate"]["max_length"],
-        "num_beams": cfg["generate"]["num_beams"]
-    }
-
-    # 7) COCO-evalcap 지표 초기화
-    metric_names = cfg["eval"].get(
-        "metrics",
-        ["BLEU", "METEOR", "ROUGE", "CIDEr", "SPICE"]
-    )
-    scorers = get_scorers(metric_names)
-
-    # 8) 캡션 생성
-    references, hypotheses, details = generate_captions(
-        model=model,
-        processor=processor,
-        dataloader=dataloader,
-        gen_args=gen_args,
-        device=device
-    )
-
-    # 9) COCO-evalcap 지표 계산
-    overall_scores = compute_scores(scorers, references, hypotheses)
-    logger.info(f"[지표] COCO-evalcap 결과: {overall_scores}")
-
-    # 10) CLIP 기반 지표 후처리
-    # "CLIP-S", "RefCLIP-S" 가 metric_names에 있으면 각각 계산
-    clip_model = None
-    clip_processor = None
-
-    if "clip-s" in [m.lower() for m in metric_names] or \
-       "refclip-s" in [m.lower() for m in metric_names]:
-        # CLIP 모델과 프로세서 로드
-        clip_model, clip_processor = get_clip_models(device)
-
-    if "clip-s" in [m.lower() for m in metric_names]:
-        clip_s = compute_clip_s(details, clip_model, clip_processor, device)
-        overall_scores["CLIP-S"] = clip_s
-        logger.info(f"[지표] CLIP-S 결과: {clip_s:.4f}")
-
-    if "refclip-s" in [m.lower() for m in metric_names]:
-        refclip_s = compute_refclip_s(details, clip_model, clip_processor, device)
-        overall_scores["RefCLIP-S"] = refclip_s
-        logger.info(f"[지표] RefCLIP-S 결과: {refclip_s:.4f}")
-
-    # 11) 결과 저장
-    output_path = cfg["output"]["result_file"]
-    try:
-        save_results(overall_scores, details, output_path)
-    except Exception as e:
-        logger.error(f"결과 저장 오류: {e}")
+        logger.critical(f"평가 프로세스 중 치명적인 오류 발생: {e}", exc_info=True)
 
 if __name__ == "__main__":
     main()
