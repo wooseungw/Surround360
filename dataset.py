@@ -67,7 +67,7 @@ class QuIC360Dataset(Dataset):
         answer = str(self.df.iloc[idx]["annotation"])
         
         # [수정] 평가 시에는 정답을 제외한 프롬프트만 모델에 제공
-        if self.split == 'train':
+        if self.split == 'train' or self.split == 'valid':
             text_to_process = f"Query: {question}###Answer: {answer}"
         else: # 'eval', 'test' 등
             text_to_process = f"Query: {question}###Answer:"
