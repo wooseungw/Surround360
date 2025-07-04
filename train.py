@@ -23,16 +23,22 @@ from dataset import QuIC360Dataset, data_collator
 from src.models.surroundblip import SurroundBlip 
 
 
-# --- [핵심 1] 1단계 학습을 위한 커스텀 트레이너 정의 ---
 class Stage1Trainer(Trainer):
     """
     1단계 Vision Pre-training을 위한 커스텀 Trainer.
     모델의 forward 함수에 `pretrain_vision_only=True` 인자를 자동으로 전달합니다.
     """
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs): # **kwargs 추가
+        """
+        Hugging Face Trainer의 training_step에서 전달하는 추가 인자들(예: num_items_in_batch)을
+        **kwargs로 받아 에러를 방지합니다.
+        """
+        # 모델의 forward 함수를 호출할 때, 1단계 학습임을 알리는 플래그를 전달합니다.
+        # 데이터셋이 텍스트 관련 입력을 포함하더라도, 모델은 이를 무시하고 overlap_loss만 계산합니다.
         outputs = model(**inputs, pretrain_vision_only=True)
         loss = outputs.get("loss")
         return (loss, outputs) if return_outputs else loss
+
 
 
 def parse_args():
