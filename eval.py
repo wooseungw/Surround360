@@ -17,7 +17,7 @@ from transformers import (
     CLIPProcessor,
     CLIPModel
 )
-from src.models.surroundblip_buffer import SurroundBlip
+from src.models.surroundblip import SurroundBlip
 
 from pycocoevalcap.bleu.bleu import Bleu
 from pycocoevalcap.meteor.meteor import Meteor
@@ -217,7 +217,7 @@ def get_model_and_processor(cfg: Dict[str, Any], device: torch.device):
                 for key, value in cfg["model"]["qformer"].items():
                     if hasattr(hf_config.qformer_config, key):
                         setattr(hf_config.qformer_config, key, value)
-            model = SurroundBlip.from_pretrained(
+            model = SurroundBlipForCausalLM.from_pretrained(
                 pretrain_path,
                 config=hf_config,
                 ignore_mismatched_sizes=True

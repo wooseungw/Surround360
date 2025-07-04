@@ -100,14 +100,20 @@ def main():
         print("Training only vision_model parameters.")
     
     elif args.stage == 2:
-        print("--- CONFIGURING FOR STAGE 2: INSTRUCTION FINE-TUNING ---")
-        # Vision Model은 동결하고, 나머지(Q-Former, LM)는 학습
+        print("--- CONFIGURING FOR STAGE 2: PROJECTOR-ONLY TRAINING ---")
+        # Vision Model과 Language Model을 모두 동결
         for name, param in model.named_parameters():
-            if "vision_model" in name:
+            # [핵심 수정] "language_model"이 이름에 포함된 경우에도 그래디언트 계산을 끔
+            if "vision_model" in name or "language_model" in name:
                 param.requires_grad = False
             else:
+                # Q-Former, language_projection 등 '연결부'만 학습
                 param.requires_grad = True
-        print("Froze vision_model. Training Q-Former, Language Projection, and Language Model.")
+        print(f"Froze vision_model and language_model. Training projector/q-former only.")
+    # 학습 가능한 파라미터 수를 다시 계산하여 확인
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"Trainable parameters: {trainable_params:,} ({(100 * trainable_params / total_params):.2f}%)")
 
     # 장치 설정
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
