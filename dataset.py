@@ -72,7 +72,7 @@ class QuIC360Dataset(Dataset):
         else: # 'test' 등
             text_to_process = f"Query: {question}###Answer:"
 
-        
+        image = Image.open(image_path).convert("RGB")
         # --- [핵심 4] 정의된 증강 파이프라인 적용 ---
         # processor에 들어가기 전, PIL Image 상태에서 증강을 적용합니다.
         if self.transform:
