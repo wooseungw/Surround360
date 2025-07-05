@@ -75,8 +75,7 @@ class QuIC360Dataset(Dataset):
         image = Image.open(image_path).convert("RGB")
         # --- [핵심 4] 정의된 증강 파이프라인 적용 ---
         # processor에 들어가기 전, PIL Image 상태에서 증강을 적용합니다.
-        if self.transform:
-            image = self.transform(image)
+        
 
         # 이미지를 로드합니다.
         inputs = self.processor(
@@ -88,7 +87,8 @@ class QuIC360Dataset(Dataset):
                 padding="max_length",
                 truncation=True,
             )
-        
+        if self.transform:
+            image = self.transform(image)
         if self.do_crop:
             inputs["pixel_values"] = self.crop_equirectangular_tensor(inputs["pixel_values"])
         
