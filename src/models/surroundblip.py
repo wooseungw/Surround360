@@ -81,7 +81,7 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
     def get_input_embeddings(self) -> nn.Module:
         return self.language_model.get_input_embeddings()
 
-    # --- 2단계 학습 및 generate 호환성을 위한 forward 메서드 ---
+    # --- 2단계 학습 및 generate 호환성을 위한 forward 메서드 (수정 완료) ---
     def forward(
         self,
         pixel_values: torch.FloatTensor,
@@ -91,17 +91,22 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         return_dict: Optional[bool] = None,
         pretrain_vision_only: bool = False,
         overlap_consistency_weight: float = 1.0,
-        **kwargs: Any,  # 추가 인자들
+        **kwargs: Any,
     ) -> Dict[str, torch.Tensor]:
+        
+        # kwargs에서 'output_attentions', 'output_hidden_states' 등을 가져오도록 설정
+        # generate 메소드와의 호환성을 위해 필요
+        output_attentions = kwargs.get("output_attentions", False)
+        output_hidden_states = kwargs.get("output_hidden_states", False)
         
         B, P, C, H, W = pixel_values.shape
         pixel_values_flat = pixel_values.view(B * P, C, H, W)
+        # 비전 모델에 output_hidden_states 전달
         vision_outputs = self.vision_model(pixel_values=pixel_values_flat, output_hidden_states=True, return_dict=True)
 
         # === 1단계: Vision Pre-training 경로 ===
         if pretrain_vision_only:
             loss = self._compute_overlap_loss(vision_outputs, B, P) * overlap_consistency_weight
-            # Trainer가 "loss" 키를 기대하므로 딕셔너리로 반환
             return {"loss": loss}
 
         # === 2단계: Instruction Fine-tuning 경로 ===
@@ -116,17 +121,78 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         query_output = query_outputs.last_hidden_state
         
         language_model_inputs = self.language_projection(query_output)
-        text_embeds = self.get_input_embeddings()(input_ids)
-        inputs_embeds = torch.cat([language_model_inputs, text_embeds], dim=1)
         
+        # generate 메소드에서는 input_ids 대신 inputs_embeds만 전달될 수 있음
+        if input_ids is not None:
+            text_embeds = self.get_input_embeddings()(input_ids)
+            inputs_embeds = torch.cat([language_model_inputs, text_embeds], dim=1)
+        else:
+            # generate의 두 번째 step부터는 이 경로를 사용
+            inputs_embeds = language_model_inputs
+
+        # attention_mask 확장
         lang_model_attention_mask = torch.ones(language_model_inputs.size()[:-1], dtype=torch.long, device=inputs_embeds.device)
-        if attention_mask is None: attention_mask = torch.ones_like(input_ids)
-        attention_mask = torch.cat([lang_model_attention_mask, attention_mask], dim=1)
+        if attention_mask is None and input_ids is not None:
+            attention_mask = torch.ones_like(input_ids)
         
-        outputs = self.language_model(inputs_embeds=inputs_embeds, attention_mask=attention_mask, labels=labels, return_dict=True)
+        if attention_mask is not None:
+            attention_mask = torch.cat([lang_model_attention_mask, attention_mask], dim=1)
         
-        # Trainer가 "loss"와 "logits" 키를 기대함
-        return {"loss": outputs.loss, "logits": outputs.logits}
+        # --- [핵심 수정] labels 텐서를 inputs_embeds 길이에 맞게 동적으로 확장 ---
+        # 학습 시에만 (labels가 존재할 때만) 이 로직이 실행됩니다.
+        if labels is not None:
+            # 1. 목표 시퀀스 길이는 확장된 inputs_embeds의 길이
+            target_length = inputs_embeds.shape[1]
+            
+            # 2. IGNORE_INDEX(-100)로 채워진 새로운 레이블 텐서 생성
+            #    shape: [batch_size, target_length]
+            new_labels = torch.full(
+                (B, target_length), 
+                -100,  # IGNORE_INDEX
+                dtype=torch.long, 
+                device=inputs_embeds.device
+            )
+            
+            # 3. 이미지 토큰(Q-Former 출력)의 길이를 계산
+            num_vision_tokens = language_model_inputs.shape[1]
+            
+            # 4. 새로운 레이블 텐서의 뒷부분에 원래 텍스트 레이블을 복사
+            #    이때, 원래 텍스트 레이블의 길이를 그대로 사용
+            new_labels[:, num_vision_tokens:] = labels
+            
+            # 5. 확장된 new_labels를 실제 사용할 레이블로 지정
+            labels_for_loss = new_labels
+        else:
+            # 추론/생성 시에는 labels가 필요 없음
+            labels_for_loss = None
+
+        # 확장된 `labels_for_loss`와 `attention_mask`를 사용하여 언어 모델 호출
+        outputs = self.language_model(
+            inputs_embeds=inputs_embeds, 
+            attention_mask=attention_mask, 
+            labels=labels_for_loss, 
+            return_dict=True,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            # generate 메소드 호환성을 위해 past_key_values 전달
+            past_key_values=kwargs.get("past_key_values")
+        )
+        
+        # `generate`는 loss를 반환하지 않으므로, loss가 없는 경우를 처리
+        loss = outputs.loss if outputs.loss is not None else None
+        
+        # return_dict가 False일 수 있는 경우를 대비 (Hugging Face 표준)
+        if not return_dict:
+            # loss가 None일 때 outputs.logits만 반환하도록 처리
+            return (outputs.logits,) if loss is None else (loss, outputs.logits)
+
+        return {
+            "loss": loss,
+            "logits": outputs.logits,
+            "past_key_values": outputs.past_key_values,
+            "hidden_states": outputs.hidden_states,
+            "attentions": outputs.attentions,
+        }
 
     # --- generate 호환성을 위한 '생성 위임' 방식의 generate 메서드 ---
     @torch.no_grad()
