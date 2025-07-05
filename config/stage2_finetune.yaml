@@ -32,21 +32,10 @@ training:
     train: 16
     eval: 16
   gradient_accumulation_steps: 1
-  logging_steps: 4 # 더 자주 로깅
-  eval_strategy: "steps" # step 기반으로 변경
-  eval_steps: 100 # 500 step마다 평가
-  save_strategy: "steps" # step 기반 저장
-  save_steps: 100
-  save_total_limit: 3 # 최대 3개 체크포인트 유지
-  load_best_model_at_end: true
-  metric_for_best_model: "eval_loss" # 최상의 모델 기준
-  greater_is_better: false
-
+  
   # 보고 설정
   report_to: "wandb"
 
-  # 추가 최적화
-  max_grad_norm: 1.0 # gradient clipping
 
 deepspeed:
   enabled: false
