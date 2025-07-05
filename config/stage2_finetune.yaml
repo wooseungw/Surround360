@@ -26,7 +26,7 @@ data:
 training:
   output_dir: "./checkpoints/surroundblip_stage2_finetune"
   run_name: "stage2-instruction_finetune"
-  num_epochs: 5
+  num_epochs: 3
   learning_rate: 2.0e-5 # Fine-tuning을 위한 더 낮은 learning rate
   batch_size:
     train: 16
