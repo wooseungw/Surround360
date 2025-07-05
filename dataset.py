@@ -9,6 +9,7 @@ from py360convert import e2p
 import numpy as np
 import torch    
 from torchvision import transforms
+from copy import deepcopy
 
 PAD_TOKEN_ID = 1
 IGNORE_INDEX = -100
@@ -75,7 +76,24 @@ class QuIC360Dataset(Dataset):
         image = Image.open(image_path).convert("RGB")
         # --- [핵심 4] 정의된 증강 파이프라인 적용 ---
         # processor에 들어가기 전, PIL Image 상태에서 증강을 적용합니다.
+        # --- [수정] Processor를 deepcopy하여 원본 객체 보호 ---
+        self.processor = deepcopy(self.processor)
         
+        # --- [수정] 별도의 transform 대신 Processor에 증강 로직 통합 ---
+        # self.transform을 사용하는 기존 방식은 삭제하고 아래 로직으로 대체합니다.
+        if self.transform and self.split == 'train':
+            print("Applying data augmentation by modifying the processor.")
+            # ToTensor와 Normalize 사이에 증강 파이프라인을 삽입합니다.
+            # 이렇게 하면 텐서 기반의 안정적인 증강 함수가 사용되어 OverflowError가 발생하지 않습니다.
+            self.processor.image_processor.transform.transforms.insert(
+                -1, # Normalize 바로 앞에(-1) 삽입
+                transforms.Compose([
+                    transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1),
+                    transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0)),
+                ])
+            )
+        else:
+            print("Not applying data augmentation.")
 
         # 이미지를 로드합니다.
         inputs = self.processor(
@@ -87,8 +105,7 @@ class QuIC360Dataset(Dataset):
                 padding="max_length",
                 truncation=True,
             )
-        if self.transform:
-            image = self.transform(image)
+
         if self.do_crop:
             inputs["pixel_values"] = self.crop_equirectangular_tensor(inputs["pixel_values"])
         
