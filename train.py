@@ -132,7 +132,7 @@ def main():
         do_crop=data_cfg['do_crop'],
         fov=data_cfg['fov'],
         overlap_ratio=data_cfg['overlap_ratio'],
-        use_augmentation=data_cfg.get('use_augmentation', False) 
+        use_augmentation=data_cfg.get('use_augmentation', True) # 증강 여부 설정
     )
     eval_dataset = QuIC360Dataset(
         data_dir / data_cfg['valid_file'], 
