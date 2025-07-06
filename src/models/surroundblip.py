@@ -152,7 +152,7 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         if stage == "vision_pretrain":
             loss = self._compute_overlap_loss(vision_outputs, B, P) * overlap_consistency_weight
             return {"loss": loss}
-
+        
         # === Q-Former 입력 준비 (2, 3단계 공통) ===
         image_embeds = vision_outputs.last_hidden_state
         S, D = image_embeds.shape[1], image_embeds.shape[2]
