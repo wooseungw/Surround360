@@ -3,117 +3,124 @@ import pandas as pd
 from PIL import Image
 # 최대 픽셀 수 제한 해제 (None으로 설정)
 Image.MAX_IMAGE_PIXELS = None
+from copy import deepcopy
+import torch
 from torch.utils.data import Dataset
 from transformers import Blip2Processor
-from py360convert import e2p
-import numpy as np
-import torch    
 from torchvision import transforms
 
-PAD_TOKEN_ID = 1
+# from py360convert import e2p # 필요시 활성화
+
+# 상수 정의
 IGNORE_INDEX = -100
 
 class QuIC360Dataset(Dataset):
-    def __init__(self, 
+    """
+    모든 모범 사례를 적용한 최종 데이터셋 클래스.
+    - Processor 통합 데이터 증강
+    - 정교한 레이블 마스킹
+    - 이미지 로딩 에러 처리
+    """
+    def __init__(self,
                  csv_file: str,
                  processor: Blip2Processor,
-                 image_size: list = [224,224],
-                 max_length: Optional[int] = None,
                  split: str = "train",
+                 max_length: Optional[int] = 128,
+                 image_size: List[int] = [224, 224],
                  do_crop: bool = False,
-                 fov: Optional[float] = None,
-                 overlap_ratio: Optional[float] = None,
-                 # --- [핵심 2] 데이터 증강을 제어하는 인자 추가 ---
-                 use_augmentation: bool = True):
+                 fov: Optional[float] = 90.0,
+                 overlap_ratio: Optional[float] = 0.5):
         super().__init__()
         
         self.df = pd.read_csv(csv_file)
-        self.processor = processor
-        self.max_length = max_length
         self.split = split
+        self.max_length = max_length
         self.do_crop = do_crop
         
+        # [핵심 개선 1] 별도의 transform 대신 Processor에 증강 로직 통합
+        self.processor = deepcopy(processor) # 원본 processor 보호
+        if self.split == 'train':
+            print("Applying data augmentation by modifying the processor's transform pipeline.")
+            # ToTensor와 Normalize 사이에 증강 파이프라인 삽입 (텐서 기반의 안정적 증강)
+            self.processor.image_processor.transform.transforms.insert(
+                -1, # Normalize 바로 앞에 삽입
+                transforms.Compose([
+                    transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1),
+                    transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0)),
+                ])
+            )
+        else:
+            print(f"Not applying data augmentation for '{self.split}' split.")
+
+        # 이미지 크기 설정 (기존과 동일)
+        self.pers_image_size = tuple(image_size)
         if self.do_crop:
-            self.image_size = (int(image_size[0] * 2), int(image_size[1] * 4))
+            self.eq_image_size = (int(image_size[0] * 2), int(image_size[1] * 4))
             self.fov = fov
             self.overlap_ratio = overlap_ratio
-            print(f"Do Crop, Image size: {self.image_size}")
         else:
-            self.image_size = tuple(image_size)
-            print(f"Do not Crop, Image size: {self.image_size}")
-            
-        # --- [핵심 3] 증강 파이프라인 정의 ---
-        self.use_augmentation = use_augmentation
-        if self.use_augmentation and self.split == 'train':
-            print("Applying data augmentation (ColorJitter, GaussianBlur).")
-            # 1단계 학습을 위한 강력한 증강 설정
-            self.transform = transforms.Compose([
-                transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1),
-                transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0)),
-                # 필요에 따라 다른 증강 기법 추가 가능
-                # 예: transforms.RandomErasing(), transforms.RandomAffine(...)
-            ])
-        else:
-            # 학습 데이터가 아니거나, 증강을 사용하지 않을 경우
-            self.transform = None
-            print("Not applying data augmentation.")
+            self.eq_image_size = self.pers_image_size
         
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.df)
-    
-    def __getitem__(self, idx: int) -> Dict[str, Union[torch.Tensor, str]]:
-        image_path = self.df.iloc[idx]["url"]
-        question = str(self.df.iloc[idx]["query"])
-        answer = str(self.df.iloc[idx]["annotation"])
-        
-        # [수정] 평가 시에는 정답을 제외한 프롬프트만 모델에 제공
-        if self.split == 'train' or self.split == 'valid':
-            text_to_process = f"Query: {question}###Answer: {answer}"
-        else: # 'test' 등
-            text_to_process = f"Query: {question}###Answer:"
 
-        image = Image.open(image_path).convert("RGB")
-        # --- [핵심 4] 정의된 증강 파이프라인 적용 ---
-        # processor에 들어가기 전, PIL Image 상태에서 증강을 적용합니다.
-        # if self.transform:
-        #     image = self.transform(image)
+    def __getitem__(self, idx: int) -> Optional[Dict[str, Union[torch.Tensor, str]]]:
+        try:
+            row = self.df.iloc[idx]
+            image_path = row["url"]
+            question = str(row["query"])
+            answer = str(row.get("annotation", "")) # 테스트셋에 정답이 없을 수 있음
+            
+            image = Image.open(image_path).convert("RGB")
+        except Exception as e:
+            # [핵심 개선 2] 이미지 로딩 실패 시 에러를 내지 않고 해당 샘플을 건너뜀
+            print(f"Warning: Could not load data at index {idx}, path {image_path}. Skipping sample. Error: {e}")
+            return None
 
-        # 이미지를 로드합니다.
+        # 프롬프트와 정답 텍스트 준비
+        prompt_text = f"Query: {question}###Answer: "
+        if self.split in ['train', 'valid']:
+            answer_text = f"{answer}{self.processor.tokenizer.eos_token}"
+        else:
+            answer_text = ""
+
+        # Processor가 이미지 처리(증강 포함)와 텍스트 토큰화를 모두 수행
         inputs = self.processor(
-                images=image,
-                text=text_to_process,
-                size=self.image_size,
-                return_tensors="pt",
-                max_length=self.max_length,
-                padding="max_length",
-                truncation=True,
-            )
-        
+            images=image,
+            text=prompt_text + answer_text,
+            size={"height": self.eq_image_size[0], "width": self.eq_image_size[1]},
+            return_tensors="pt",
+            max_length=self.max_length,
+            padding="max_length",
+            truncation=True,
+        )
+
+        # [핵심 개선 3] 정교한 레이블 마스킹
+        # 모델이 질문(prompt) 부분은 학습하지 않고 정답(answer) 부분만 학습하도록 레이블 생성
+        labels = inputs.input_ids.clone()
+        if self.split in ['train', 'valid']:
+            # 프롬프트 부분에 해당하는 토큰들을 IGNORE_INDEX(-100)로 마스킹
+            prompt_tokens = self.processor.tokenizer(prompt_text, return_tensors="pt", add_special_tokens=True).input_ids.shape[1]
+            # [CLS] 같은 스페셜 토큰을 고려하여, 실제 프롬프트 길이 직전까지 마스킹
+            labels[:, :prompt_tokens - 1] = IGNORE_INDEX
+        else:
+            labels[:] = IGNORE_INDEX
+            
+        # 패딩 토큰도 마스킹
+        labels[labels == self.processor.tokenizer.pad_token_id] = IGNORE_INDEX
+
+        # crop 로직은 텐서 기반이므로 그대로 사용
         if self.do_crop:
             inputs["pixel_values"] = self.crop_equirectangular_tensor(inputs["pixel_values"])
-        
-        labels = inputs.input_ids.clone()
-        labels[labels == self.processor.tokenizer.pad_token_id] = IGNORE_INDEX
-        
-        # 디버깅 (첫 번째 샘플에 대해서만)
-        if idx == 0:
-            print("==Input sequence==")
-            print(inputs["input_ids"][0])
-            print(self.processor.tokenizer.decode(inputs["input_ids"][0], skip_special_tokens=False))
-            print("==Attention mask==")
-            print(inputs["attention_mask"][0])
-            print("==Labels==")
-            print(labels[0])
             
-        # Hugging Face Trainer가 기대하는 평평한 구조로 반환
         return {
-            "pixel_values": inputs["pixel_values"].squeeze(0),  # (Num Crops ,C, H, W)
-            "input_ids": inputs["input_ids"].squeeze(0),        # (L1)
-            "attention_mask": inputs["attention_mask"].squeeze(0),  # (L1)
-            "labels": labels.squeeze(0),          # (L2)
+            "pixel_values": inputs["pixel_values"].squeeze(0),
+            "input_ids": inputs["input_ids"].squeeze(0),
+            "attention_mask": inputs["attention_mask"].squeeze(0),
+            "labels": labels.squeeze(0),
             "image_path": image_path,
             "question": question,
-            "answer": answer
+            "answer": answer,
         }
 
     def crop_equirectangular_tensor(self, img_tensor: torch.Tensor) -> torch.Tensor:
