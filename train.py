@@ -96,7 +96,7 @@ def train(config: dict):
     # --- 모델 및 프로세서 로딩 ---
     print("Loading Processor and Model...")
     # processor는 BLIP-2의 것을 그대로 사용하거나, 필요시 커스텀
-    processor = Blip2Processor.from_pretrained(config['model']['processor_name_or_path'])
+    processor = Blip2Processor.from_pretrained(config['model']['pretrain_name'])
     
     # 체크포인트 경로에 따라 모델 로딩
     if config['model']['load_from_checkpoint']:

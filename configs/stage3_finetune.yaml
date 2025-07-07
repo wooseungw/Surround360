@@ -3,27 +3,38 @@
 stage_name: "finetune"
 
 wandb:
-  name: "stage3-finetune"
+  name: "stage3-finetune-lora"
 
 model:
-  load_from_checkpoint: "./checkpoints/3stage_S2_qformer/final_checkpoint" # 2단계 결과물 로드
-  freeze_modules: [] # 전체 미세 조정
+  # [중요] 2단계에서 저장된 체크포인트를 불러와서 학습을 이어감
+  load_from_checkpoint: "./checkpoints/stage2_qformer_pretrain/final_checkpoint"
+  
+  # 전체 파라미터를 미세 조정할 경우 빈 리스트로 설정
+  # LoRA 사용 시에는 아래 use_lora: true로 제어
+  freeze_modules: [] 
+  
+  # LoRA (PEFT)를 사용한 효율적 미세 조정
   use_lora: true
   lora_config:
     r: 16
     lora_alpha: 32
     lora_dropout: 0.05
-    target_modules: ["q_proj", "v_proj"]
+    target_modules: ["q_proj", "v_proj", "k_proj", "o_proj"]
 
 data:
-  train_csv_path: "./data/quic360/train.csv"
-  valid_csv_path: "./data/quic360/valid.csv"
+  # VQA 또는 Instruction 데이터셋 경로
+  train_csv_path: "./data/instruction_vqa/train.csv"
+  valid_csv_path: "./data/instruction_vqa/valid.csv"
+  # 질문+답변 길이에 맞게 max_length 조정
   max_length: 256
 
 training_args:
-  output_dir: "./checkpoints/3stage_S3_finetune"
-  run_name: "3stage_S3_finetune"
+  output_dir: "./checkpoints/stage3_finetune_lora"
+  run_name: "stage3-finetune-lora"
+  
+  # 미세 조정에는 일반적으로 더 낮은 학습률과 적은 에포크 사용
   num_train_epochs: 3
-  learning_rate: 2e-5
+  learning_rate: 2.0e-5
+  
   eval_steps: 200
   save_steps: 200

@@ -3,23 +3,31 @@
 stage_name: "qformer_pretrain"
 
 wandb:
-  name: "stage2-qformer_pretrain"
+  name: "stage2-qformer-pretrain"
 
 model:
-  load_from_checkpoint: "./checkpoints/3stage_S1_vision/final_checkpoint" # 1단계 결과물 로드
+  # [중요] 1단계에서 저장된 체크포인트를 불러와서 학습을 이어감
+  load_from_checkpoint: "./checkpoints/stage1_vision_pretrain/final_checkpoint"
+  
+  # Vision Encoder와 LLM은 고정하고 Q-Former 관련 모듈만 학습
   freeze_modules:
     - 'vision_model'
     - 'language_model'
 
 data:
-  train_csv_path: "./data/quic360/train.csv"
-  valid_csv_path: "./data/quic360/valid.csv"
+  # 이미지-캡션 쌍으로 구성된 대규모 데이터셋 경로
+  train_csv_path: "./data/coco_captions/train.csv"
+  valid_csv_path: "data/coco_captions/valid.csv"
+  # 캡션 길이에 맞게 max_length 조정
   max_length: 64
 
 training_args:
-  output_dir: "./checkpoints/3stage_S2_qformer"
-  run_name: "3stage_S2_qformer"
+  output_dir: "./checkpoints/stage2_qformer_pretrain"
+  run_name: "stage2-qformer-pretrain"
+  
+  # 2단계에 적합한 하이퍼파라미터
   num_train_epochs: 10
-  learning_rate: 1e-4
+  learning_rate: 1.0e-4
+  
   eval_steps: 1000
   save_steps: 1000
