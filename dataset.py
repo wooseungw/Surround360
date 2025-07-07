@@ -1,4 +1,4 @@
-from typing import Dict, Union, Optional
+from typing import Dict, Union, Optional, List
 import pandas as pd
 from PIL import Image
 # 최대 픽셀 수 제한 해제 (None으로 설정)
