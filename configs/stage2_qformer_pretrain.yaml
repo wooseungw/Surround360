@@ -25,8 +25,8 @@ training_args:
   run_name: "stage2-qformer-pretrain"
   
   # 2단계에 적합한 하이퍼파라미터
-  num_train_epochs: 10
-  learning_rate: 1.0e-4
+  num_train_epochs: 5
+  learning_rate: 1.0e-5
   
   eval_steps: 1000
   save_steps: 1000
