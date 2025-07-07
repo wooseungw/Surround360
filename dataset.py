@@ -41,18 +41,18 @@ class QuIC360Dataset(Dataset):
         
         # [핵심 개선 1] 별도의 transform 대신 Processor에 증강 로직 통합
         self.processor = deepcopy(processor) # 원본 processor 보호
-        if self.split == 'train':
-            print("Applying data augmentation by modifying the processor's transform pipeline.")
-            # ToTensor와 Normalize 사이에 증강 파이프라인 삽입 (텐서 기반의 안정적 증강)
-            self.processor.image_processor.transform.transforms.insert(
-                -1, # Normalize 바로 앞에 삽입
-                transforms.Compose([
-                    transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1),
-                    transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0)),
-                ])
-            )
-        else:
-            print(f"Not applying data augmentation for '{self.split}' split.")
+        # if self.split == 'train':
+        #     print("Applying data augmentation by modifying the processor's transform pipeline.")
+        #     # ToTensor와 Normalize 사이에 증강 파이프라인 삽입 (텐서 기반의 안정적 증강)
+        #     self.processor.image_processor.transform.transforms.insert(
+        #         -1, # Normalize 바로 앞에 삽입
+        #         transforms.Compose([
+        #             transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1),
+        #             transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 2.0)),
+        #         ])
+        #     )
+        # else:
+        #     print(f"Not applying data augmentation for '{self.split}' split.")
 
         # 이미지 크기 설정 (기존과 동일)
         self.pers_image_size = tuple(image_size)
