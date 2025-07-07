@@ -1,17 +1,12 @@
-# configs/stage1_vision_pretrain.yaml
+# configs/stage1_vision_pretrain.yaml (최종 수정본)
 
-# train.py가 참조할 현재 학습 단계 이름
 stage_name: "vision_pretrain"
 
-# Wandb 실행(run)의 고유 이름
 wandb:
   name: "stage1-vision-pretrain"
 
 model:
-  # 1단계는 처음부터 학습하므로 로드할 체크포인트가 없음
   load_from_checkpoint: null
-  
-  # Vision Encoder 외 모든 모듈의 가중치를 동결
   freeze_modules:
     - 'qformer'
     - 'language_projection'
@@ -21,21 +16,19 @@ model:
 data:
   train_csv_path: "./data/quic360/train.csv"
   valid_csv_path: "./data/quic360/valid.csv"
+  # base.yaml의 max_length를 그대로 사용하거나, 필요시 여기서 덮어쓰기
 
+# [핵심 수정] TrainingArguments가 사용하는 표준 인자만 여기에 남깁니다.
 training_args:
-  # 1단계 결과물이 저장될 경로
   output_dir: "./checkpoints/stage1_vision_pretrain"
-  run_name: "stage1-vision-pretrain" # Trainer 내부 및 Wandb에 표시될 이름
-  
-  # 1단계에 적합한 학습 하이퍼파라미터
+  run_name: "stage1-vision-pretrain"
   num_train_epochs: 5
   learning_rate: 1.0e-4
-  
-  # 평가 및 저장 주기
   eval_steps: 500
   save_steps: 500
-  
-  # forward에 전달될 loss 가중치
+  # (base.yaml에 있는 다른 표준 인자들은 자동으로 병합됩니다)
+
+# [핵심 수정] loss_specific_args와 같은 커스텀 인자는 별도의 최상위 섹션으로 분리합니다.
 custom_args:
   loss_specific_args:
     overlap_consistency_weight: 1.0
