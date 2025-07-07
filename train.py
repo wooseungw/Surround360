@@ -156,7 +156,7 @@ def train(config: dict):
         per_device_eval_batch_size=config['training_args']['per_device_eval_batch_size'],
         num_train_epochs=config['training_args']['num_train_epochs'],
         learning_rate=config['training_args']['learning_rate'],
-        weight_decay=config.get('training_args', {}).get('weight_decay', 0),
+        weight_decay=config.get('training_args', {}).get('weight_decay', 0.0),
         logging_dir=config.get('training_args', {}).get('logging_dir', './logs'),
         logging_steps=config.get('training_args', {}).get('logging_steps', 50),
         save_strategy=config['training_args']['save_strategy'],
