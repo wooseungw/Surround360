@@ -15,9 +15,8 @@ model:
     - 'language_model'
 
 data:
-  # 이미지-캡션 쌍으로 구성된 대규모 데이터셋 경로
-  train_csv_path: "./data/coco_captions/train.csv"
-  valid_csv_path: "data/coco_captions/valid.csv"
+  train_csv_path: "./data/quic360/train.csv"
+  valid_csv_path: "./data/quic360/valid.csv"
   # 캡션 길이에 맞게 max_length 조정
   max_length: 64
 

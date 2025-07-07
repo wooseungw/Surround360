@@ -22,9 +22,8 @@ model:
     target_modules: ["q_proj", "v_proj", "k_proj", "o_proj"]
 
 data:
-  # VQA 또는 Instruction 데이터셋 경로
-  train_csv_path: "./data/instruction_vqa/train.csv"
-  valid_csv_path: "./data/instruction_vqa/valid.csv"
+  train_csv_path: "./data/quic360/train.csv"
+  valid_csv_path: "./data/quic360/valid.csv"
   # 질문+답변 길이에 맞게 max_length 조정
   max_length: 256
 
