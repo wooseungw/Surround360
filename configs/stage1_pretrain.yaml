@@ -29,10 +29,12 @@ training_args:
   
   # 1단계에 적합한 학습 하이퍼파라미터
   num_train_epochs: 5
-  learning_rate: 1.0e-5
+  learning_rate: 1.0e-4
   
   # 평가 및 저장 주기
   eval_steps: 500
   save_steps: 500
   
-  
+  # forward에 전달될 loss 가중치
+  loss_specific_args:
+    overlap_consistency_weight: 0.5

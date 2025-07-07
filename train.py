@@ -150,7 +150,19 @@ def train(config: dict):
     
     # --- Trainer 설정 및 실행 ---
     print("Initializing Trainer...")
-    training_args = TrainingArguments(**config['training_args'])
+    training_args = TrainingArguments(
+        output_dir=config['training_args']['output_dir'],
+        per_device_train_batch_size=config['training_args']['per_device_train_batch_size'],
+        per_device_eval_batch_size=config['training_args']['per_device_eval_batch_size'],
+        num_train_epochs=config['training_args']['num_train_epochs'],
+        learning_rate=config['training_args']['learning_rate'],
+        weight_decay=config.get('training_args', {}).get('weight_decay', 0),
+        logging_dir=config['training_args']['logging_dir'],
+        logging_steps=config['training_args']['logging_steps'],
+        save_strategy=config['training_args']['save_strategy'],
+        save_total_limit=config['training_args']['save_total_limit'],
+        eval_strategy=config['training_args'].get('eval_strategy', 'steps'),
+                                      )
     
     trainer = StageAwareTrainer(
         model=model,
