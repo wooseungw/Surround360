@@ -152,15 +152,15 @@ def train(config: dict):
     print("Initializing Trainer...")
     training_args = TrainingArguments(**config['training_args'])
     
-    # train.py (수정 후)
+    # 2. StageAwareTrainer를 초기화합니다.
     trainer = StageAwareTrainer(
         model=model,
-        args=training_args, # 표준 인자들은 이 곳을 통해 전달됨
+        args=training_args, # 표준 인자 전달
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         data_collator=data_collator,
         stage_name=config['stage_name'],
-        # [수정] 'custom_args' 섹션에서 커스텀 인자를 가져옴
+        # [핵심] yaml의 'custom_args' 섹션에서 커스텀 인자를 가져옵니다.
         loss_specific_args=config.get('custom_args', {}).get('loss_specific_args', {})
     )
 
