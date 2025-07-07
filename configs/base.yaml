@@ -32,10 +32,6 @@ training_args:
   save_total_limit: 2
   eval_strategy: "steps"
 
-custom_args:
-  loss_specific_args:
-    overlap_consistency_weight: 1.0
-
 # DeepSpeed 설정
 deepspeed:
   enabled: false

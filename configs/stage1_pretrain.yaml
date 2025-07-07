@@ -36,5 +36,6 @@ training_args:
   save_steps: 500
   
   # forward에 전달될 loss 가중치
+custom_args:
   loss_specific_args:
-    overlap_consistency_weight: 0.5
+    overlap_consistency_weight: 1.0
