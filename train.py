@@ -139,13 +139,13 @@ def train(config: dict):
         csv_file=config['data']['train_csv_path'],
         processor=processor,
         split='train',
-        **config['data'] # image_size 등 나머지 데이터 관련 인자 전달
+        max_length=config['data']['max_length'],
     )
     eval_dataset = QuIC360Dataset(
         csv_file=config['data']['valid_csv_path'],
         processor=processor,
         split='eval',
-        **config['data']
+        max_length=config['data']['max_length'],
     )
     
     # --- Trainer 설정 및 실행 ---

@@ -1,5 +1,6 @@
 from typing import Dict, Union, Optional, List
 import pandas as pd
+import numpy as np
 from PIL import Image
 # 최대 픽셀 수 제한 해제 (None으로 설정)
 Image.MAX_IMAGE_PIXELS = None
@@ -12,6 +13,7 @@ from torchvision import transforms
 # from py360convert import e2p # 필요시 활성화
 
 # 상수 정의
+PAD_TOKEN_ID = 1  # BLIP-2의 패딩 토큰 ID
 IGNORE_INDEX = -100
 
 class QuIC360Dataset(Dataset):
