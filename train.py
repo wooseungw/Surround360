@@ -142,7 +142,7 @@ def train(config: dict):
         **config['data'] # image_size 등 나머지 데이터 관련 인자 전달
     )
     eval_dataset = QuIC360Dataset(
-        csv_file=config['data']['eval_csv_path'],
+        csv_file=config['data']['valid_csv_path'],
         processor=processor,
         split='eval',
         **config['data']
