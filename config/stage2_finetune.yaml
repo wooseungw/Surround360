@@ -12,16 +12,9 @@ model:
   save_dir: "./checkpoints/surroundblip_stage2_finetune"
 
 data:
-  dir: "./data/quic360"
-  train_file: "train.csv"
-  valid_file: "valid.csv"
-  max_length: 128
-  image_size: [224, 224]
-  do_crop: True
-  fov: 90.0
-  overlap_ratio: 0.5
-  # --- 2단계 학습 시 증강 비활성화 ---
-  use_augmentation: False
+  train_csv_path: "./data/quic360/train.csv"
+  valid_csv_path: "./data/quic360/valid.csv"
+  augmentation: false
 
 training:
   output_dir: "./checkpoints/surroundblip_stage2_finetune"

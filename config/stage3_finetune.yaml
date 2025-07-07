@@ -1,0 +1,29 @@
+# configs/stage3_finetune.yaml
+
+stage_name: "finetune"
+
+wandb:
+  name: "stage3-finetune"
+
+model:
+  load_from_checkpoint: "./checkpoints/3stage_S2_qformer/final_checkpoint" # 2단계 결과물 로드
+  freeze_modules: [] # 전체 미세 조정
+  use_lora: true
+  lora_config:
+    r: 16
+    lora_alpha: 32
+    lora_dropout: 0.05
+    target_modules: ["q_proj", "v_proj"]
+
+data:
+  train_csv_path: "./data/quic360/train.csv"
+  valid_csv_path: "./data/quic360/valid.csv"
+  max_length: 256
+
+training_args:
+  output_dir: "./checkpoints/3stage_S3_finetune"
+  run_name: "3stage_S3_finetune"
+  num_train_epochs: 3
+  learning_rate: 2e-5
+  eval_steps: 200
+  save_steps: 200

@@ -1,0 +1,25 @@
+# configs/stage2_qformer_pretrain.yaml
+
+stage_name: "qformer_pretrain"
+
+wandb:
+  name: "stage2-qformer_pretrain"
+
+model:
+  load_from_checkpoint: "./checkpoints/3stage_S1_vision/final_checkpoint" # 1단계 결과물 로드
+  freeze_modules:
+    - 'vision_model'
+    - 'language_model'
+
+data:
+  train_csv_path: "./data/quic360/train.csv"
+  valid_csv_path: "./data/quic360/valid.csv"
+  max_length: 64
+
+training_args:
+  output_dir: "./checkpoints/3stage_S2_qformer"
+  run_name: "3stage_S2_qformer"
+  num_train_epochs: 10
+  learning_rate: 1e-4
+  eval_steps: 1000
+  save_steps: 1000

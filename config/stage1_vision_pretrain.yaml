@@ -1,10 +1,12 @@
+# configs/stage1_vision_pretrain.yaml
+
 stage_name: "vision_pretrain"
 
 wandb:
-  name: "legacy_2stage_step1_vision"
+  name: "stage1-vision_pretrain"
 
 model:
-  load_from_checkpoint: null
+  load_from_checkpoint: null # 처음부터 시작
   freeze_modules:
     - 'qformer'
     - 'language_projection'
@@ -16,8 +18,8 @@ data:
   valid_csv_path: "./data/quic360/valid.csv"
 
 training_args:
-  output_dir: "./checkpoints/2stage_S1_vision"
-  run_name: "2stage_S1_vision"
+  output_dir: "./checkpoints/3stage_S1_vision"
+  run_name: "3stage_S1_vision"
   num_train_epochs: 5
   learning_rate: 1e-4
   eval_steps: 500
