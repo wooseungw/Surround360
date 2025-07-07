@@ -157,11 +157,11 @@ def train(config: dict):
         num_train_epochs=config['training_args']['num_train_epochs'],
         learning_rate=config['training_args']['learning_rate'],
         weight_decay=config.get('training_args', {}).get('weight_decay', 0),
-        logging_dir=config['training_args']['logging_dir'],
-        logging_steps=config['training_args']['logging_steps'],
+        logging_dir=config.get('training_args', {}).get('logging_dir', './logs'),
+        logging_steps=config.get('training_args', {}).get('logging_steps', 50),
         save_strategy=config['training_args']['save_strategy'],
         save_total_limit=config['training_args']['save_total_limit'],
-        eval_strategy=config['training_args'].get('eval_strategy', 'steps'),
+        eval_strategy=config['training_args']['eval_strategy'],
                                       )
     
     trainer = StageAwareTrainer(
