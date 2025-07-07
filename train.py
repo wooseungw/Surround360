@@ -150,28 +150,18 @@ def train(config: dict):
     
     # --- Trainer 설정 및 실행 ---
     print("Initializing Trainer...")
-    training_args = TrainingArguments(
-        output_dir=config['training_args']['output_dir'],
-        per_device_train_batch_size=config['training_args']['per_device_train_batch_size'],
-        per_device_eval_batch_size=config['training_args']['per_device_eval_batch_size'],
-        num_train_epochs=config['training_args']['num_train_epochs'],
-        learning_rate=config['training_args']['learning_rate'],
-        logging_dir=config.get('training_args', {}).get('logging_dir', './logs'),
-        logging_steps=config.get('training_args', {}).get('logging_steps', 50),
-        save_strategy=config['training_args']['save_strategy'],
-        save_total_limit=config['training_args']['save_total_limit'],
-        eval_strategy=config['training_args']['eval_strategy'],
-                                      )
+    training_args = TrainingArguments(**config['training_args'])
     
+    # train.py (수정 후)
     trainer = StageAwareTrainer(
         model=model,
-        args=training_args,
+        args=training_args, # 표준 인자들은 이 곳을 통해 전달됨
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         data_collator=data_collator,
-        # 커스텀 인자 전달
         stage_name=config['stage_name'],
-        loss_specific_args=config.get('training_args', {}).get('loss_specific_args', {})
+        # [수정] 'custom_args' 섹션에서 커스텀 인자를 가져옴
+        loss_specific_args=config.get('custom_args', {}).get('loss_specific_args', {})
     )
 
     print(f"--- Starting Training for Stage: {config['stage_name']} ---")
