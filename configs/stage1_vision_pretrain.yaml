@@ -1,12 +1,12 @@
-# configs/stage1_vision_pretrain.yaml
+# configs/stage1_vision_pretrain.yaml (최종 수정본)
 
 stage_name: "vision_pretrain"
 
 wandb:
-  name: "stage1-vision_pretrain"
+  name: "stage1-vision-pretrain"
 
 model:
-  load_from_checkpoint: null # 처음부터 시작
+  load_from_checkpoint: null
   freeze_modules:
     - 'qformer'
     - 'language_projection'
@@ -16,13 +16,20 @@ model:
 data:
   train_csv_path: "./data/quic360/train.csv"
   valid_csv_path: "./data/quic360/valid.csv"
+  # base.yaml의 max_length를 그대로 사용하거나, 필요시 여기서 덮어쓰기
 
-training_args:
-  output_dir: "./checkpoints/3stage_S1_vision"
-  run_name: "3stage_S1_vision"
-  num_train_epochs: 5
-  learning_rate: 1e-4
-  eval_steps: 500
-  save_steps: 500
+# [핵심 수정] loss_specific_args와 같은 커스텀 인자는 별도의 최상위 섹션으로 분리합니다.
+custom_args:
   loss_specific_args:
     overlap_consistency_weight: 1.0
+
+# [핵심 수정] TrainingArguments가 사용하는 표준 인자만 여기에 남깁니다.
+training_args:
+  output_dir: "./checkpoints/stage1_vision_pretrain"
+  run_name: "stage1-vision-pretrain"
+  num_train_epochs: 5
+  learning_rate: 1.0e-4
+  eval_steps: 500
+  save_steps: 500
+  # (base.yaml에 있는 다른 표준 인자들은 자동으로 병합됩니다)
+

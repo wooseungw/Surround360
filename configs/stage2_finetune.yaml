@@ -1,35 +1,32 @@
+# configs/stage2_qformer_pretrain.yaml
+
+stage_name: "qformer_pretrain"
+
 wandb:
-  project: "Surround360_2Stage"
-  name: "stage2-instruction_finetune"
+  name: "stage2-qformer-pretrain"
 
 model:
-  name: "surround"
-  # --- [중요] 1단계에서 학습된 모델의 경로를 pretrain_name으로 지정 ---
-  pretrain_name: "./checkpoints/surroundblip_stage1_vision_pretrain" 
-  num_query_tokens: 32
-  qformer:
-    num_hidden_layers: 12
-  save_dir: "./checkpoints/surroundblip_stage2_finetune"
+  # [중요] 1단계에서 저장된 체크포인트를 불러와서 학습을 이어감
+  load_from_checkpoint: "./checkpoints/stage1_vision_pretrain/final_checkpoint"
+  
+  # Vision Encoder와 LLM은 고정하고 Q-Former 관련 모듈만 학습
+  freeze_modules:
+    - 'vision_model'
+    - 'language_model'
 
 data:
   train_csv_path: "./data/quic360/train.csv"
   valid_csv_path: "./data/quic360/valid.csv"
-  augmentation: false
+  # 캡션 길이에 맞게 max_length 조정
+  max_length: 64
 
-training:
-  output_dir: "./checkpoints/surroundblip_stage2_finetune"
-  run_name: "stage2-instruction_finetune"
-  num_epochs: 3
-  learning_rate: 2.0e-5 # Fine-tuning을 위한 더 낮은 learning rate
-  batch_size:
-    train: 16
-    eval: 16
-  gradient_accumulation_steps: 1
+training_args:
+  output_dir: "./checkpoints/stage2_qformer_pretrain"
+  run_name: "stage2-qformer-pretrain"
   
-  # 보고 설정
-  report_to: "wandb"
-
-
-deepspeed:
-  enabled: false
-  config: "config/ds_config_zero3.json"
+  # 2단계에 적합한 하이퍼파라미터
+  num_train_epochs: 5
+  learning_rate: 1.0e-5
+  
+  eval_steps: 1000
+  save_steps: 1000
