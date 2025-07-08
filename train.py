@@ -57,7 +57,7 @@ class StageAwareTrainer(Trainer):
         self.stage_name = stage_name
         self.loss_specific_args = loss_specific_args if loss_specific_args is not None else {}
     
-    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         # inputs 딕셔너리에 stage와 loss 관련 인자를 추가하여 모델에 전달
         inputs["stage"] = self.stage_name
         inputs.update(self.loss_specific_args)
