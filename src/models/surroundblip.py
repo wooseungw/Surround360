@@ -184,20 +184,62 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
             # 이미지 쿼리 피처 사용 (평균 풀링 또는 첫 번째 토큰)
             image_feat = F.normalize(image_qformer_outputs.last_hidden_state[:, 0, :], dim=-1)
             
+            # [개선] 같은 이미지 ID를 고려한 마스킹된 대조 학습
+            # 같은 이미지에 대한 다른 QA 쌍들은 negative에서 제외
+            # 이를 위해 image_ids가 데이터로더에서 제공된다고 가정
+            # 실제 구현에서는 데이터셋에서 image_id를 같이 반환해야 함
+            
             # 유사도 계산
             sim_i2t = torch.matmul(image_feat, text_feat.t()) * self.temp
             sim_t2i = torch.matmul(text_feat, image_feat.t()) * self.temp
+            
+            # [개선] 같은 이미지의 다른 QA 쌍 처리
+            # kwargs에서 image_ids를 받아서 마스킹 처리
+            if 'image_ids' in kwargs and kwargs['image_ids'] is not None:
+                image_ids = kwargs['image_ids']
+                # 같은 이미지 ID를 가진 샘플들은 모두 positive로 취급
+                same_image_mask = (image_ids.unsqueeze(1) == image_ids.unsqueeze(0)).float()
+                
+                # 대각선은 자기 자신이므로 유지, 같은 이미지의 다른 QA는 마스킹
+                mask = torch.eye(B, device=pixel_values.device) + (same_image_mask - torch.eye(B, device=pixel_values.device)) * (-1e9)
+                sim_i2t = sim_i2t + mask
+                sim_t2i = sim_t2i + mask
             
             targets = torch.arange(B, device=pixel_values.device)
             loss_itc = (F.cross_entropy(sim_i2t, targets) + F.cross_entropy(sim_t2i, targets)) / 2
             
             # --- 2.2: Image-Text Matching (ITM) Loss ---
-            # Positive 페어에 대한 Q-Former 출력 (ITC에서 재사용)
-            # Negative 페어 생성: 텍스트를 한 칸씩 민다 (roll)
-            input_ids_neg = torch.cat([input_ids[1:], input_ids[:1]], dim=0)
-            attention_mask_neg = torch.cat([attention_mask[1:], attention_mask[:1]], dim=0)
+            # [개선] 더 나은 negative 샘플링
+            # 실제로 다른 이미지의 텍스트만 negative로 사용
             
-            text_qformer_outputs_neg = self.qformer(input_ids=input_ids_neg, attention_mask=attention_mask_neg, return_dict=True)
+            if 'image_ids' in kwargs and kwargs['image_ids'] is not None:
+                image_ids = kwargs['image_ids']
+                # 다른 이미지 ID를 가진 인덱스들을 찾아서 negative로 사용
+                neg_indices = []
+                for i in range(B):
+                    # 현재 샘플과 다른 이미지 ID를 가진 샘플들의 인덱스
+                    different_image_indices = torch.where(image_ids != image_ids[i])[0]
+                    if len(different_image_indices) > 0:
+                        # 랜덤하게 하나 선택
+                        neg_idx = different_image_indices[torch.randint(0, len(different_image_indices), (1,))]
+                        neg_indices.append(neg_idx.item())
+                    else:
+                        # 다른 이미지가 없으면 다음 인덱스 사용 (fallback)
+                        neg_indices.append((i + 1) % B)
+                neg_indices = torch.tensor(neg_indices, device=pixel_values.device)
+            else:
+                # image_ids가 없으면 기존 방식 사용 (단순 shift)
+                neg_indices = torch.arange(1, B + 1, device=pixel_values.device) % B
+            
+            # Negative 텍스트 샘플링
+            input_ids_neg = input_ids[neg_indices]
+            attention_mask_neg = attention_mask[neg_indices]
+            
+            text_qformer_outputs_neg = self.qformer(
+                input_ids=input_ids_neg, 
+                attention_mask=attention_mask_neg, 
+                return_dict=True
+            )
             text_embeds_neg = text_qformer_outputs_neg.last_hidden_state
 
             # Positive/Negative 텍스트 임베딩을 이미지 쿼리 출력과 결합

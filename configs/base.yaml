@@ -2,7 +2,7 @@
 
 # Wandb 공통 설정
 wandb:
-  project: "SurroundBlip_Final_Unified"
+  project: "Surround360"
 
 # 모델 공통 아키텍처 설정
 model:

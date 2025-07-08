@@ -74,6 +74,14 @@ class QuIC360Dataset(Dataset):
             question = str(row["query"])
             answer = str(row.get("annotation", "")) # 테스트셋에 정답이 없을 수 있음
             
+            # [추가] 이미지 ID 추출 - CSV에 image_id 컬럼이 있으면 사용, 없으면 경로에서 추출
+            if "image_id" in row:
+                image_id = str(row["image_id"])
+            else:
+                # 이미지 경로에서 파일명을 image_id로 사용
+                import os
+                image_id = os.path.splitext(os.path.basename(image_path))[0]
+            
             image = Image.open(image_path).convert("RGB")
         except Exception as e:
             # [핵심 개선 2] 이미지 로딩 실패 시 에러를 내지 않고 해당 샘플을 건너뜀
@@ -122,6 +130,7 @@ class QuIC360Dataset(Dataset):
             "attention_mask": inputs["attention_mask"].squeeze(0),
             "labels": labels.squeeze(0),
             "image_path": image_path,
+            "image_id": image_id,  # [추가] 이미지 ID
             "question": question,
             "answer": answer,
         }
@@ -190,6 +199,14 @@ def data_collator(features):
         labels_mask = labels.clone()
         labels_mask[labels == PAD_TOKEN_ID] = -100  # Set pad tokens to -100 so they're ignored in loss calculation
         batch["labels"] = labels_mask
+    
+    # [추가] image_ids를 텐서로 변환 (문자열을 해시값으로 변환)
+    if "image_id" in first:
+        image_ids = [f["image_id"] for f in features]
+        # 문자열 image_id를 정수로 변환 (같은 이미지는 같은 값)
+        unique_ids = list(set(image_ids))
+        id_to_int = {img_id: i for i, img_id in enumerate(unique_ids)}
+        batch["image_ids"] = torch.tensor([id_to_int[img_id] for img_id in image_ids], dtype=torch.long)
     
     # 문자열 필드들은 리스트로
     if "image_path" in first:
