@@ -18,6 +18,11 @@ data:
   valid_csv_path: "./data/quic360/valid.csv"
   # base.yaml의 max_length를 그대로 사용하거나, 필요시 여기서 덮어쓰기
 
+# [핵심 수정] loss_specific_args와 같은 커스텀 인자는 별도의 최상위 섹션으로 분리합니다.
+custom_args:
+  loss_specific_args:
+    overlap_consistency_weight: 1.0
+
 # [핵심 수정] TrainingArguments가 사용하는 표준 인자만 여기에 남깁니다.
 training_args:
   output_dir: "./checkpoints/stage1_vision_pretrain"
@@ -28,7 +33,3 @@ training_args:
   save_steps: 500
   # (base.yaml에 있는 다른 표준 인자들은 자동으로 병합됩니다)
 
-# [핵심 수정] loss_specific_args와 같은 커스텀 인자는 별도의 최상위 섹션으로 분리합니다.
-custom_args:
-  loss_specific_args:
-    overlap_consistency_weight: 1.0

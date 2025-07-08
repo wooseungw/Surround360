@@ -140,12 +140,18 @@ def train(config: dict):
         processor=processor,
         split='train',
         max_length=config['data']['max_length'],
+        do_crop=config['data'].get('do_crop', False),
+        fov=config['data'].get('fov', None),
+        overlap_ratio=config['data'].get('overlap_ratio', None),
     )
     eval_dataset = QuIC360Dataset(
         csv_file=config['data']['valid_csv_path'],
         processor=processor,
         split='eval',
         max_length=config['data']['max_length'],
+        do_crop=config['data'].get('do_crop', False),
+        fov=config['data'].get('fov', None),
+        overlap_ratio=config['data'].get('overlap_ratio', None),
     )
     
     # --- Trainer 설정 및 실행 ---
