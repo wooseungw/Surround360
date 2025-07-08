@@ -153,39 +153,37 @@ def train(config: dict):
         fov=config['data'].get('fov', None),
         overlap_ratio=config['data'].get('overlap_ratio', None),
     )
-    
-    # --- Trainer 설정 및 실행 ---
+    # --- Trainer 설정 및 실행 (개선된 방식) ---
     print("Initializing Trainer...")
-    # 1. yaml의 training_args 섹션을 안전하게 복사합니다.
+    
+    # 1. training_args 딕셔너리를 안전하게 복사
     training_args_dict = config.get('training_args', {}).copy()
 
-    # 2. 우리가 사용하는 커스텀 인자들을 이 딕셔너리에서 '제거(pop)'합니다.
-    #    pop은 값을 가져오는 동시에 딕셔너리에서 해당 키를 삭제합니다.
-    #    .get()을 사용하여 해당 키가 없어도 에러가 발생하지 않도록 합니다.
+    # 2. 커스텀 인자를 pop()을 이용해 안전하게 분리
     loss_specific_args = training_args_dict.pop('loss_specific_args', {})
 
-    # 3. 이제 training_args_dict에는 순수한 표준 인자들만 남아있습니다.
-    #    이 "정리된" 딕셔너리를 사용하여 TrainingArguments를 안전하게 초기화합니다.
-    #    이제 절대로 TypeError가 발생하지 않습니다.
+    # 3. 순수한 표준 인자만 남은 딕셔너리로 TrainingArguments 초기화
     training_args = TrainingArguments(**training_args_dict)
     
-    # 2. StageAwareTrainer를 초기화합니다.
+    # 4. StageAwareTrainer에 분리된 커스텀 인자 전달
     trainer = StageAwareTrainer(
         model=model,
-        args=training_args, # 표준 인자 전달
+        args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         data_collator=data_collator,
         stage_name=config['stage_name'],
-        # [핵심] yaml의 'custom_args' 섹션에서 커스텀 인자를 가져옵니다.
-        loss_specific_args=loss_specific_args # 분리된 커스텀 인자 전달
+        loss_specific_args=loss_specific_args
     )
 
     print(f"--- Starting Training for Stage: {config['stage_name']} ---")
     trainer.train(resume_from_checkpoint=training_args.resume_from_checkpoint)
     
     print("Training finished. Saving final model.")
-    model.save_pretrained(os.path.join(training_args.output_dir, "final_checkpoint"))
+    if config['model'].get('use_lora', False):
+        trainer.save_model(os.path.join(training_args.output_dir, "final_checkpoint"))
+    else:
+        model.save_pretrained(os.path.join(training_args.output_dir, "final_checkpoint"))
 
 
 # ----------------------------------------------------------------

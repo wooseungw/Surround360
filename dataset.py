@@ -9,6 +9,7 @@ import torch
 from torch.utils.data import Dataset
 from transformers import Blip2Processor
 from torchvision import transforms
+from py360convert import e2p
 
 # from py360convert import e2p # 필요시 활성화
 
