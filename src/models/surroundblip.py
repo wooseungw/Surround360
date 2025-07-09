@@ -15,7 +15,9 @@ from transformers.utils import (
 from transformers import AutoModelForCausalLM, AutoModelForSeq2SeqLM, AutoConfig
 from transformers.models.blip_2.modeling_blip_2 import Blip2PreTrainedModel, Blip2VisionModel, Blip2QFormerModel
 from transformers import Blip2Config
+from transformers import BertModel, BertConfig
 from ..loss.vicreg import VICRegLoss
+
 
 logger = logging.get_logger(__name__)
 
@@ -26,28 +28,31 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
 
     def __init__(self, config: Blip2Config):
         super().__init__(config)
-        # --- 기존 모듈 정의 (변경 없음) ---
+        
         self.vision_model = Blip2VisionModel(config.vision_config)
         self.query_tokens = nn.Parameter(torch.zeros(1, config.num_query_tokens, config.qformer_config.hidden_size))
         self.qformer = Blip2QFormerModel(config.qformer_config)
+        
+        # [신규] 2단계 학습을 위한 별도의 Text Encoder (BERT) 추가
+        # text_config와 별개로, qformer와 차원이 맞는 BERT를 사용
+        # 또는 config에 text_encoder_config를 추가하여 관리
+        text_encoder_config = BertConfig.from_dict(config.qformer_config.to_dict())
+        self.text_encoder = BertModel(config=text_encoder_config, add_pooling_layer=False)
+        
+        # Q-Former의 출력(768)과 LLM의 입력(예:2560) 차원을 맞춰주는 프로젝션 레이어
         self.language_projection = nn.Linear(config.qformer_config.hidden_size, config.text_config.hidden_size)
         
+        # LLM (기존과 동일)
         if config.use_decoder_only_language_model:
             self.language_model = AutoModelForCausalLM.from_config(config.text_config)
         else:
             self.language_model = AutoModelForSeq2SeqLM.from_config(config.text_config)
         
+        # Loss 계산을 위한 모듈 (기존과 동일)
         self.vicreg_loss = VICRegLoss()
-        
-        # --- [신규] 2단계 Q-Former 학습을 위한 모듈 추가 ---
-        # Image-Text Contrastive (ITC) Loss를 위한 Temperature 파라미터
         self.temp = nn.Parameter(torch.ones([]) * config.temperature)
-        
-        # Image-Text Matching (ITM) Loss를 위한 분류기 헤드
         self.itm_head = nn.Linear(config.qformer_config.hidden_size, 2)
         
-        if self.language_model._tied_weights_keys is not None:
-            self._tied_weights_keys = [f"language_model.{k}" for k in self.language_model._tied_weights_keys]
         self.post_init()
 
     # --- [해결책 1] Gradient Checkpointing 지원 메서드 ---
@@ -118,7 +123,6 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
     def get_input_embeddings(self) -> nn.Module:
         return self.language_model.get_input_embeddings()
 
-    # --- 2단계 학습 및 generate 호환성을 위한 forward 메서드 (수정 완료) ---
     def forward(
         self,
         pixel_values: torch.FloatTensor,
@@ -126,146 +130,79 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         attention_mask: Optional[torch.LongTensor] = None,
         labels: Optional[torch.LongTensor] = None,
         return_dict: Optional[bool] = None,
-        # --- 스테이지 제어 인자 ---
-        stage: str = "finetune", # "vision_pretrain", "qformer_pretrain", "finetune"
-        # --- 1단계 인자 ---
-        pretrain_vision_only: bool = False, # 하위 호환성을 위해 유지
-        overlap_consistency_weight: float = 1.0,
-        # --- 2단계 인자 ---
-        itm_head: bool = True,
+        stage: str = "finetune",
         **kwargs: Any,
     ) -> Dict[str, torch.Tensor]:
 
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-        # 하위 호환성: pretrain_vision_only=True 이면 stage를 vision_pretrain으로 간주
-        if pretrain_vision_only:
-            stage = "vision_pretrain"
-            
-        # === 공통 비전 피처 추출 ===
-        B, P, C, H, W = pixel_values.shape
-        pixel_values_flat = pixel_values.view(B * P, C, H, W)
-        vision_outputs = self.vision_model(pixel_values=pixel_values_flat, output_hidden_states=True, return_dict=True)
+        B = pixel_values.shape[0]
+
+        # === 1단계 & 공통 비전 피처 추출 ===
+        vision_outputs = self.vision_model(pixel_values=pixel_values.view(B*pixel_values.shape[1], -1, *pixel_values.shape[3:]))
+        if stage == "vision_pretrain":
+            loss = self._compute_overlap_loss(vision_outputs, B, pixel_values.shape[1])
+            return {"loss": loss}
+
+        image_embeds = vision_outputs.last_hidden_state
+        image_embeds_reshaped = image_embeds.view(B, -1, image_embeds.shape[-1])
+        image_attention_mask = torch.ones(image_embeds_reshaped.size()[:-1], dtype=torch.long, device=image_embeds_reshaped.device)
+        
+        query_tokens = self.query_tokens.expand(B, -1, -1)
+        image_qformer_outputs = self.qformer(
+            query_embeds=query_tokens,
+            encoder_hidden_states=image_embeds_reshaped,
+            encoder_attention_mask=image_attention_mask,
+            return_dict=True,
+        )
 
         # =======================================================
-        # === 1단계: Vision Pre-training
-        # =======================================================
-        if stage == "vision_pretrain":
-            loss = self._compute_overlap_loss(vision_outputs, B, P) * overlap_consistency_weight
-            return {"loss": loss}
-        
-        # === Q-Former 입력 준비 (2, 3단계 공통) ===
-        image_embeds = vision_outputs.last_hidden_state
-        S, D = image_embeds.shape[1], image_embeds.shape[2]
-        image_embeds_reshaped = image_embeds.view(B, P * S, D)
-        image_attention_mask = torch.ones(image_embeds_reshaped.size()[:-1], dtype=torch.long, device=image_embeds_reshaped.device)
-        query_tokens = self.query_tokens.expand(B, -1, -1)
-        
-        # =======================================================
-        # === [수정] 2단계: Q-Former Pre-training (3가지 Loss)
+        # === 2단계: Q-Former Pre-training (올바른 아키텍처)
         # =======================================================
         if stage == "qformer_pretrain":
-            # --- 2.1: Image-Text Contrastive (ITC) Loss ---
-            
-            # [수정] LLM의 임베딩 대신, Q-Former의 임베딩 레이어를 사용합니다.
-            # self.qformer.embeddings는 768 차원의 텐서를 생성합니다.
-            text_embeds = self.qformer.embeddings(input_ids=input_ids)
-            
-            # 이제 text_embeds를 query_embeds로 전달하여 Q-Former를 통과시킵니다.
-            text_qformer_outputs = self.qformer(
-                query_embeds=text_embeds,
+            # [수정] 새로 추가한 text_encoder를 사용하여 텍스트 피처 추출
+            text_encoder_outputs = self.text_encoder(
+                input_ids=input_ids,
                 attention_mask=attention_mask,
-                return_dict=True,
+                return_dict=True
             )
-            text_feat = F.normalize(text_qformer_outputs.last_hidden_state[:, 0, :], dim=-1)
-
-            # 이미지 피처 추출 (기존과 동일)
-            image_qformer_outputs = self.qformer(
-                query_embeds=query_tokens,
-                encoder_hidden_states=image_embeds_reshaped,
-                encoder_attention_mask=image_attention_mask,
-                return_dict=True,
-            )
+            text_feat = F.normalize(text_encoder_outputs.last_hidden_state[:, 0, :], dim=-1)
             image_feat = F.normalize(image_qformer_outputs.last_hidden_state[:, 0, :], dim=-1)
-            
+
+            # ITC Loss 계산
             sim_i2t = torch.matmul(image_feat, text_feat.t()) * self.temp
             sim_t2i = torch.matmul(text_feat, image_feat.t()) * self.temp
+            loss_itc = (F.cross_entropy(sim_i2t, torch.arange(B, device=B.device)) + F.cross_entropy(sim_t2i, torch.arange(B, device=B.device))) / 2
 
-            # [유지] 개선된 ITC Loss 로직 (매우 좋은 아이디어입니다)
-            image_ids = kwargs.get("image_id") # 데이터셋에서 'image_id'를 전달받아야 함
-            if image_ids is not None:
-                image_ids_tensor = torch.tensor([hash(img_id) for img_id in image_ids], device=pixel_values.device)
-                same_image_mask = (image_ids_tensor.unsqueeze(1) == image_ids_tensor.unsqueeze(0))
-                sim_i2t = sim_i2t.masked_fill(~same_image_mask, -1e9)
-                sim_t2i = sim_t2i.masked_fill(~same_image_mask, -1e9)
+            # ITM Loss 계산
+            input_ids_neg = torch.cat([input_ids[1:], input_ids[:1]], dim=0)
+            attention_mask_neg = torch.cat([attention_mask[1:], attention_mask[:1]], dim=0)
+            text_encoder_outputs_neg = self.text_encoder(input_ids=input_ids_neg, attention_mask=attention_mask_neg, return_dict=True)
+            text_embeds_all = torch.cat([text_encoder_outputs.last_hidden_state, text_encoder_outputs_neg.last_hidden_state], dim=0)
             
-            targets = torch.arange(B, device=pixel_values.device)
-            loss_itc = (F.cross_entropy(sim_i2t, targets) + F.cross_entropy(sim_t2i, targets)) / 2
-            
-            # --- 2.2: Image-Text Matching (ITM) Loss ---
-            # [유지] Hard Negative 샘플링 로직 (매우 좋은 아이디어입니다)
-            with torch.no_grad():
-                weights = sim_i2t.clone()
-                weights.fill_diagonal_(-1e9) # 자기 자신은 제외
-                if image_ids is not None: # 같은 이미지도 제외
-                    weights.masked_fill_(same_image_mask, -1e9)
-                
-                # 각 이미지에 대해 가장 유사도가 낮은(어려운) 텍스트를 negative로 선택
-                _, neg_indices = weights.min(dim=1)
-
-            input_ids_neg = input_ids[neg_indices]
-            attention_mask_neg = attention_mask[neg_indices]
-            
-            # [수정] Negative 샘플의 input_ids도 임베딩으로 변환
-            text_embeds_neg = self.get_input_embeddings()(input_ids_neg)
-            
-            # [수정] ITM을 위한 Q-Former 호출 시, 텍스트 부분을 encoder_hidden_states로 전달
-            # Positive 텍스트
-            itm_pos_outputs = self.qformer(
-                query_embeds=image_qformer_outputs.last_hidden_state,
-                encoder_hidden_states=text_embeds,
-                encoder_attention_mask=attention_mask,
+            query_output_itm = image_qformer_outputs.last_hidden_state.repeat(2, 1, 1)
+            itm_outputs = self.qformer(
+                query_embeds=query_output_itm,
+                encoder_hidden_states=text_embeds_all,
                 return_dict=True
-            ).last_hidden_state[:,0,:]
-            # Negative 텍스트
-            itm_neg_outputs = self.qformer(
-                query_embeds=image_qformer_outputs.last_hidden_state,
-                encoder_hidden_states=text_embeds_neg,
-                encoder_attention_mask=attention_mask_neg,
-                return_dict=True
-            ).last_hidden_state[:,0,:]
+            ).last_hidden_state[:, 0, :]
             
-            itm_logits = self.itm_head(torch.cat([itm_pos_outputs, itm_neg_outputs], dim=0))
-            itm_labels = torch.cat([torch.ones(B, dtype=torch.long), torch.zeros(B, dtype=torch.long)], dim=0).to(pixel_values.device)
-            loss_itm = F.cross_entropy(itm_logits, itm_labels)
+            itm_logits = self.itm_head(itm_outputs)
+            loss_itm = F.cross_entropy(itm_logits, torch.cat([torch.ones(B, dtype=torch.long), torch.zeros(B, dtype=torch.long)], dim=0).to(B.device))
 
-            # --- 2.3: Image-Grounded Text Generation (LM) Loss ---
+            # LM Loss 계산
             language_model_inputs = self.language_projection(image_qformer_outputs.last_hidden_state)
             lm_outputs = self._compute_generative_loss(language_model_inputs, input_ids, attention_mask, labels)
             loss_lm = lm_outputs.loss
 
-            # --- 최종 손실 결합 ---
-            total_loss = loss_itc + loss_itm + loss_lm
-            return {"loss": total_loss, "loss_itc": loss_itc, "loss_itm": loss_itm, "loss_lm": loss_lm}
+            return {"loss": loss_itc + loss_itm + loss_lm}
 
         # =======================================================
         # === 3단계: Instruction Fine-tuning
         # =======================================================
         if stage == "finetune":
-            query_outputs = self.qformer(query_embeds=query_tokens, encoder_hidden_states=image_embeds_reshaped, encoder_attention_mask=image_attention_mask, return_dict=True)
-            language_model_inputs = self.language_projection(query_outputs.last_hidden_state)
-            
+            language_model_inputs = self.language_projection(image_qformer_outputs.last_hidden_state)
             lm_outputs = self._compute_generative_loss(language_model_inputs, input_ids, attention_mask, labels, **kwargs)
-
-            if not return_dict:
-                return (lm_outputs.loss, lm_outputs.logits) if lm_outputs.loss is not None else (lm_outputs.logits,)
-
-            return {
-                "loss": lm_outputs.loss,
-                "logits": lm_outputs.logits,
-                "past_key_values": lm_outputs.past_key_values,
-                "hidden_states": lm_outputs.hidden_states,
-                "attentions": lm_outputs.attentions,
-            }
+            return {"loss": lm_outputs.loss, "logits": lm_outputs.logits}
 
     # --- generate 호환성을 위한 '생성 위임' 방식의 generate 메서드 ---
     @torch.no_grad()
