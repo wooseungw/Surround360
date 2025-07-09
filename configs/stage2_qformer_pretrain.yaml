@@ -7,7 +7,9 @@ wandb:
 
 model:
   # [중요] 1단계에서 저장된 체크포인트를 불러와서 학습을 이어감
-  load_from_checkpoint: "./checkpoints/stage1_vision_pretrain/final_checkpoint"
+  # checkpoint-32500
+  # ./checkpoints/stage1_vision_pretrain/final_checkpoint
+  load_from_checkpoint: "./checkpoints/stage1_vision_pretrain/checkpoint-32500"
   
   # Vision Encoder와 LLM은 고정하고 Q-Former 관련 모듈만 학습
   freeze_modules:
@@ -25,7 +27,7 @@ training_args:
   run_name: "stage2-qformer-pretrain"
   
   # 2단계에 적합한 하이퍼파라미터
-  num_train_epochs: 5
+  num_train_epochs: 3
   learning_rate: 1.0e-5
   
   eval_steps: 1000

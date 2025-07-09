@@ -32,7 +32,7 @@ training_args:
   run_name: "stage3-finetune-lora"
   
   # 미세 조정에는 일반적으로 더 낮은 학습률과 적은 에포크 사용
-  num_train_epochs: 3
+  num_train_epochs: 2
   learning_rate: 2.0e-5
   
   eval_steps: 200

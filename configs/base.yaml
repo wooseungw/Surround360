@@ -21,8 +21,8 @@ data:
 
 # 학습 인자 공통 설정
 training_args:
-  per_device_train_batch_size: 1
-  per_device_eval_batch_size: 1
+  per_device_train_batch_size: 8
+  per_device_eval_batch_size: 8
   gradient_accumulation_steps: 1
   fp16: true
   report_to: "wandb"
