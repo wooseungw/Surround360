@@ -131,6 +131,23 @@ def train(config: dict):
         )
         model = get_peft_model(model, peft_config)
     
+    # train 함수 내, 모델 로드 직후 추가
+    print("Synchronizing tokenizer and model vocab size...")
+
+    model_embedding_size = model.get_input_embeddings().weight.shape[0]
+    tokenizer_vocab_size = len(processor.tokenizer) # Use len(tokenizer) for safety
+
+    if model_embedding_size != tokenizer_vocab_size:
+        print(f"Vocab size mismatch! Model: {model_embedding_size}, Tokenizer: {tokenizer_vocab_size}")
+        print("Resizing model token embeddings to match tokenizer...")
+        model.resize_token_embeddings(tokenizer_vocab_size)
+
+        # 만약 language_model 내부에도 별도의 config가 있다면 함께 업데이트 (모델 구현에 따라 다름)
+        # model.config.text_config.vocab_size = tokenizer_vocab_size
+        # model.language_model.config.vocab_size = tokenizer_vocab_size
+    else:
+        print("Vocab sizes are already synchronized.")
+        
     print_trainable_parameters(model)
 
     # --- 데이터셋 로딩 ---
