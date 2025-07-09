@@ -32,21 +32,12 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         self.vision_model = Blip2VisionModel(config.vision_config)
         self.query_tokens = nn.Parameter(torch.zeros(1, config.num_query_tokens, config.qformer_config.hidden_size))
         self.qformer = Blip2QFormerModel(config.qformer_config)
+        # 3. 별도의 Text Encoder (BERT)
+        #    - ITC, ITM Loss 계산 전용. Q-Former와 차원이 호환되어야 함.
+        #    - 'bert-base-uncased'는 hidden_size가 768로 Q-Former와 호환됩니다.
+        print("Initializing text encoder for pre-training from 'bert-base-uncased'.")
+        self.text_encoder = BertModel.from_pretrained("bert-base-uncased", add_pooling_layer=False)
         
-        # [신규] 2단계 학습을 위한 별도의 Text Encoder (BERT) 추가
-        # text_config와 별개로, qformer와 차원이 맞는 BERT를 사용
-        # 또는 config에 text_encoder_config를 추가하여 관리
-        if processor is not None:
-            # Processor의 토크나이저 설정을 기반으로 Text Encoder를 생성
-            text_encoder_config = BertConfig.from_dict(processor.tokenizer.bert.config.to_dict())
-            self.text_encoder = BertModel(config=text_encoder_config, add_pooling_layer=False)
-            # 어휘 크기를 강제로 맞춰줌
-            self.text_encoder.resize_token_embeddings(len(processor.tokenizer))
-        else:
-            # 기존 방식 (프로세서가 없을 때)
-            text_encoder_config = BertConfig.from_dict(config.qformer_config.to_dict())
-            self.text_encoder = BertModel(config=text_encoder_config, add_pooling_layer=False)
-
         # Q-Former의 출력(768)과 LLM의 입력(예:2560) 차원을 맞춰주는 프로젝션 레이어
         self.language_projection = nn.Linear(config.qformer_config.hidden_size, config.text_config.hidden_size)
         
