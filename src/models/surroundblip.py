@@ -165,9 +165,12 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         # =======================================================
         if stage == "qformer_pretrain":
             # --- 2.1: Image-Text Contrastive (ITC) Loss ---
-            # [수정] input_ids를 임베딩으로 변환
-            text_embeds = self.get_input_embeddings()(input_ids)
-            # [수정] 변환된 임베딩을 query_embeds로 전달
+            
+            # [수정] LLM의 임베딩 대신, Q-Former의 임베딩 레이어를 사용합니다.
+            # self.qformer.embeddings는 768 차원의 텐서를 생성합니다.
+            text_embeds = self.qformer.embeddings(input_ids=input_ids)
+            
+            # 이제 text_embeds를 query_embeds로 전달하여 Q-Former를 통과시킵니다.
             text_qformer_outputs = self.qformer(
                 query_embeds=text_embeds,
                 attention_mask=attention_mask,
