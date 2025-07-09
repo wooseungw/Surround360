@@ -174,13 +174,12 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         if stage == "qformer_pretrain":
             # --- 2.1: Image-Text Contrastive (ITC) Loss ---
             # [수정] input_ids를 임베딩으로 변환
-            text_embeds = self.get_input_embeddings()(input_ids)
-            # [수정] 변환된 임베딩을 query_embeds로 전달
             text_qformer_outputs = self.qformer(
-                query_embeds=text_embeds,
+                input_ids=input_ids,
                 attention_mask=attention_mask,
                 return_dict=True,
             )
+            # Q-Former의 last_hidden_state에서 [CLS] 토큰에 해당하는 특징을 사용
             text_feat = F.normalize(text_qformer_outputs.last_hidden_state[:, 0, :], dim=-1)
 
             # 이미지 피처 추출 (기존과 동일)
