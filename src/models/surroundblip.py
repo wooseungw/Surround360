@@ -14,7 +14,7 @@ from transformers.utils import (
 )
 from transformers import AutoModelForCausalLM, AutoModelForSeq2SeqLM, AutoConfig
 from transformers.models.blip_2.modeling_blip_2 import Blip2PreTrainedModel, Blip2VisionModel, Blip2QFormerModel
-from transformers import Blip2Config
+from transformers import Blip2Config, Blip2Processor
 from transformers import BertModel, BertConfig
 from ..loss.vicreg import VICRegLoss
 
@@ -26,7 +26,7 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
     config_class = Blip2Config
     main_input_name = "pixel_values"
 
-    def __init__(self, config: Blip2Config):
+    def __init__(self, config: Blip2Config, processor: Optional[Blip2Processor] = None):
         super().__init__(config)
         
         self.vision_model = Blip2VisionModel(config.vision_config)
@@ -36,9 +36,17 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         # [신규] 2단계 학습을 위한 별도의 Text Encoder (BERT) 추가
         # text_config와 별개로, qformer와 차원이 맞는 BERT를 사용
         # 또는 config에 text_encoder_config를 추가하여 관리
-        text_encoder_config = BertConfig.from_dict(config.qformer_config.to_dict())
-        self.text_encoder = BertModel(config=text_encoder_config, add_pooling_layer=False)
-        
+        if processor is not None:
+            # Processor의 토크나이저 설정을 기반으로 Text Encoder를 생성
+            text_encoder_config = BertConfig.from_dict(processor.tokenizer.bert.config.to_dict())
+            self.text_encoder = BertModel(config=text_encoder_config, add_pooling_layer=False)
+            # 어휘 크기를 강제로 맞춰줌
+            self.text_encoder.resize_token_embeddings(len(processor.tokenizer))
+        else:
+            # 기존 방식 (프로세서가 없을 때)
+            text_encoder_config = BertConfig.from_dict(config.qformer_config.to_dict())
+            self.text_encoder = BertModel(config=text_encoder_config, add_pooling_layer=False)
+
         # Q-Former의 출력(768)과 LLM의 입력(예:2560) 차원을 맞춰주는 프로젝션 레이어
         self.language_projection = nn.Linear(config.qformer_config.hidden_size, config.text_config.hidden_size)
         
