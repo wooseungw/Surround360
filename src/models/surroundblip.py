@@ -174,8 +174,8 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         if stage == "qformer_pretrain":
             # --- 텍스트 특징 추출 (ITC와 ITM에서 공유) ---
             # 1. Q-Former의 자체 워드 임베딩 레이어를 명시적으로 가져옵니다.
-            #    (경로: self.qformer -> bert -> embeddings -> word_embeddings)
-            qformer_word_embeddings = self.qformer.bert.embeddings.word_embeddings
+            #    (경로: self.qformer -> input_embeddings)
+            qformer_word_embeddings = self.qformer.input_embeddings
 
             # 2. input_ids를 Q-Former의 임베딩 레이어로 통과시켜 정확한 차원(768)의 임베딩을 생성합니다.
             text_embeds_for_qformer = qformer_word_embeddings(input_ids)
