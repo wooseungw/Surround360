@@ -172,28 +172,39 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
     # === [수정] 2단계: Q-Former Pre-training (3가지 Loss)
     # =======================================================
         if stage == "qformer_pretrain":
-            # --- 2.1: Image-Text Contrastive (ITC) Loss ---
-            # [수정] input_ids를 임베딩으로 변환
+            # --- 텍스트 특징 추출 (ITC와 ITM에서 공유) ---
+            # 1. Q-Former의 자체 워드 임베딩 레이어를 명시적으로 가져옵니다.
+            #    (경로: self.qformer -> bert -> embeddings -> word_embeddings)
+            qformer_word_embeddings = self.qformer.bert.embeddings.word_embeddings
+
+            # 2. input_ids를 Q-Former의 임베딩 레이어로 통과시켜 정확한 차원(768)의 임베딩을 생성합니다.
+            text_embeds_for_qformer = qformer_word_embeddings(input_ids)
+            
+            # 3. 이 임베딩을 query_embeds로 전달하여 Q-Former를 텍스트 인코더로 사용합니다.
+            #    이것이 Q-Former에서 텍스트 특징을 추출하는 올바른 방법입니다.
             text_qformer_outputs = self.qformer(
-                input_ids=input_ids,
+                query_embeds=text_embeds_for_qformer,
                 attention_mask=attention_mask,
                 return_dict=True,
             )
-            # Q-Former의 last_hidden_state에서 [CLS] 토큰에 해당하는 특징을 사용
-            text_feat = F.normalize(text_qformer_outputs.last_hidden_state[:, 0, :], dim=-1)
-
-            # 이미지 피처 추출 (기존과 동일)
+            # text_qformer_outputs.last_hidden_state의 shape: [batch_size, seq_len, 768]
+            
+            # --- 2.1: Image-Text Contrastive (ITC) Loss ---
             image_qformer_outputs = self.qformer(
                 query_embeds=query_tokens,
                 encoder_hidden_states=image_embeds_reshaped,
                 encoder_attention_mask=image_attention_mask,
                 return_dict=True,
             )
-            image_feat = F.normalize(image_qformer_outputs.last_hidden_state[:, 0, :], dim=-1)
             
+            # 이미지 특징과 텍스트 특징 추출
+            image_feat = F.normalize(image_qformer_outputs.last_hidden_state[:, 0, :], dim=-1)
+            text_feat = F.normalize(text_qformer_outputs.last_hidden_state[:, 0, :], dim=-1)
+            
+            # ITC Loss 계산 (기존 로직과 거의 동일)
             sim_i2t = torch.matmul(image_feat, text_feat.t()) * self.temp
             sim_t2i = torch.matmul(text_feat, image_feat.t()) * self.temp
-
+            
             # [유지] 개선된 ITC Loss 로직 (매우 좋은 아이디어입니다)
             image_ids = kwargs.get("image_id") # 데이터셋에서 'image_id'를 전달받아야 함
             if image_ids is not None:
@@ -218,27 +229,34 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
 
             input_ids_neg = input_ids[neg_indices]
             attention_mask_neg = attention_mask[neg_indices]
+
+            # Negative 텍스트 샘플에 대해서도 동일하게 특징 추출
+            text_embeds_neg_for_qformer = qformer_word_embeddings(input_ids_neg)
+            text_qformer_outputs_neg = self.qformer(
+                query_embeds=text_embeds_neg_for_qformer,
+                attention_mask=attention_mask_neg,
+                return_dict=True,
+            )
+
+            # Positive/Negative 텍스트 특징 텐서 결합
+            # Q-Former의 전체 시퀀스 출력을 사용 (not just CLS token)
+            text_hidden_states_all = torch.cat(
+                [text_qformer_outputs.last_hidden_state, text_qformer_outputs_neg.last_hidden_state], dim=0
+            )
+            text_attention_mask_all = torch.cat([attention_mask, attention_mask_neg], dim=0)
+
+            # 이미지 특징을 두 배로 복제하여 Positive/Negative 쌍에 맞춤
+            image_qformer_outputs_repeated = image_qformer_outputs.last_hidden_state.repeat(2, 1, 1)
+
+            # 이미지-텍스트 융합 (ITM)
+            itm_outputs = self.qformer(
+                query_embeds=image_qformer_outputs_repeated,
+                encoder_hidden_states=text_hidden_states_all,
+                encoder_attention_mask=text_attention_mask_all,
+                return_dict=True,
+            )
             
-            # [수정] Negative 샘플의 input_ids도 임베딩으로 변환
-            text_embeds_neg = self.get_input_embeddings()(input_ids_neg)
-            
-            # [수정] ITM을 위한 Q-Former 호출 시, 텍스트 부분을 encoder_hidden_states로 전달
-            # Positive 텍스트
-            itm_pos_outputs = self.qformer(
-                query_embeds=image_qformer_outputs.last_hidden_state,
-                encoder_hidden_states=text_embeds,
-                encoder_attention_mask=attention_mask,
-                return_dict=True
-            ).last_hidden_state[:,0,:]
-            # Negative 텍스트
-            itm_neg_outputs = self.qformer(
-                query_embeds=image_qformer_outputs.last_hidden_state,
-                encoder_hidden_states=text_embeds_neg,
-                encoder_attention_mask=attention_mask_neg,
-                return_dict=True
-            ).last_hidden_state[:,0,:]
-            
-            itm_logits = self.itm_head(torch.cat([itm_pos_outputs, itm_neg_outputs], dim=0))
+            itm_logits = self.itm_head(itm_outputs.last_hidden_state[:, 0, :])
             itm_labels = torch.cat([torch.ones(B, dtype=torch.long), torch.zeros(B, dtype=torch.long)], dim=0).to(pixel_values.device)
             loss_itm = F.cross_entropy(itm_logits, itm_labels)
 
