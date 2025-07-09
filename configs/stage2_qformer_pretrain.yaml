@@ -9,7 +9,7 @@ model:
   # [중요] 1단계에서 저장된 체크포인트를 불러와서 학습을 이어감
   # checkpoint-32500
   # ./checkpoints/stage1_vision_pretrain/final_checkpoint
-  load_from_checkpoint: "./checkpoints/stage1_vision_pretrain/checkpoint-32500"
+  load_from_checkpoint: "./checkpoints/stage1_vision_pretrain/final_checkpoint"
   
   # Vision Encoder와 LLM은 고정하고 Q-Former 관련 모듈만 학습
   freeze_modules:
