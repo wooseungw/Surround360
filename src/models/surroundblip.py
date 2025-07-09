@@ -117,6 +117,14 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
     # --- [해결책 3] get_input_embeddings 메서드 ---
     def get_input_embeddings(self) -> nn.Module:
         return self.language_model.get_input_embeddings()
+    
+    # --- [추가] set_input_embeddings 메서드 구현 ---
+    def set_input_embeddings(self, value: nn.Module):
+        """
+        입력 임베딩 레이어 설정 요청을 내부 언어 모델로 전달합니다.
+        resize_token_embeddings가 올바르게 작동하기 위해 필요합니다.
+        """
+        self.language_model.set_input_embeddings(value)
 
     # --- 2단계 학습 및 generate 호환성을 위한 forward 메서드 (수정 완료) ---
     def forward(
