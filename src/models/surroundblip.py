@@ -28,10 +28,13 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         self.query_tokens = nn.Parameter(torch.zeros(1, config.num_query_tokens, config.qformer_config.hidden_size))
         
         # Q-Former와 Text Encoder를 위한 설정
-        # Blip2QFormerConfig를 BertConfig로 변환하여 호환성 확보
         qformer_config = BertConfig.from_dict(config.qformer_config.to_dict())
         self.qformer = Blip2QFormerModel(qformer_config)
-        self.text_encoder = BertModel(qformer_config, add_pooling_layer=False)
+        
+        # text_encoder는 cross-attention을 사용해야 하므로, config에 is_decoder=True를 명시
+        qformer_config_for_bert = deepcopy(qformer_config)
+        qformer_config_for_bert.is_decoder = True
+        self.text_encoder = BertModel(qformer_config_for_bert, add_pooling_layer=False)
 
         # Language Model
         self.language_projection = nn.Linear(config.qformer_config.hidden_size, config.text_config.hidden_size)
@@ -122,46 +125,47 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
 
         image_embeds = self.vision_model(pixel_values=pixel_values_flat)[0]
         
-        query_tokens_expanded = self.query_tokens.expand(image_embeds.shape[0], -1, -1)
-        image_outputs = self.qformer(query_embeds=query_tokens_expanded, encoder_hidden_states=image_embeds, return_dict=True)
+        query_tokens = self.query_tokens.expand(image_embeds.shape[0], -1, -1)
+        image_outputs = self.qformer(query_embeds=query_tokens, encoder_hidden_states=image_embeds, return_dict=True)
         image_features = image_outputs.last_hidden_state
 
         if stage == "qformer_pretrain":
-            # 1. ITC Loss
-            text_outputs_itc = self.text_encoder(input_ids=input_ids, attention_mask=attention_mask, return_dict=True)
+            # 1. ITC Loss (Self-Attention)
+            text_outputs_itc = self.text_encoder(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                return_dict=True,
+                # encoder_hidden_states를 제공하지 않으면 self-attention만 수행
+            )
             image_feat_itc = F.normalize(image_features[:, 0, :], dim=-1)
             text_feat_itc = F.normalize(text_outputs_itc.last_hidden_state[:, 0, :], dim=-1)
-            
             sim_i2t = torch.matmul(image_feat_itc, text_feat_itc.t()) * self.temp
             sim_t2i = torch.matmul(text_feat_itc, image_feat_itc.t()) * self.temp
             targets = torch.arange(B, device=pixel_values.device)
             loss_itc = (F.cross_entropy(sim_i2t, targets) + F.cross_entropy(sim_t2i, targets)) / 2
             
-            # 2. ITM Loss (원본 BLIP-2 방식)
+            # 2. ITM Loss (Cross-Attention)
             with torch.no_grad():
                 weights = sim_i2t.clone()
                 weights.fill_diagonal_(-1e9)
                 _, neg_indices = weights.min(dim=1)
-
+            
             input_ids_neg = input_ids[neg_indices]
             attention_mask_neg = attention_mask[neg_indices]
 
             input_ids_all = torch.cat([input_ids, input_ids_neg], dim=0)
             attention_mask_all = torch.cat([attention_mask, attention_mask_neg], dim=0)
             
-            # 텍스트 임베딩을 Q-Former의 Query로 사용
-            text_embeds_all = self.text_encoder.embeddings(input_ids=input_ids_all)
-            
-            # 이미지 특징을 Q-Former의 Context(encoder_hidden_states)로 사용
             image_features_all = image_features.repeat(2, 1, 1)
-            image_attention_mask_all = torch.ones(image_features_all.size()[:-1], dtype=torch.long, device=image_features_all.device)
-
-            itm_outputs = self.qformer(
-                query_embeds=text_embeds_all,
+            image_attention_mask_all = torch.ones(image_features_all.shape[:-1], dtype=torch.long, device=image_features_all.device)
+            
+            # self.text_encoder를 Cross-Attention 모드로 사용
+            itm_outputs = self.text_encoder(
+                input_ids=input_ids_all,
                 attention_mask=attention_mask_all,
                 encoder_hidden_states=image_features_all,
                 encoder_attention_mask=image_attention_mask_all,
-                return_dict=True
+                return_dict=True,
             )
             
             itm_logits = self.itm_head(itm_outputs.last_hidden_state[:, 0, :])
@@ -197,7 +201,9 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         image_embeds = self.vision_model(pixel_values=pixel_values_flat)[0]
         image_attention_mask = torch.ones(image_embeds.size()[:-1], dtype=torch.long, device=image_embeds.device)
         
-        query_tokens = self.query_tokens.expand(B, -1, -1)
+        # `generate`에서는 배치 사이즈가 다를 수 있으므로 B를 다시 계산
+        B_actual = image_embeds.shape[0] if P==1 else B
+        query_tokens = self.query_tokens.expand(B_actual, -1, -1)
         
         query_outputs = self.qformer(
             query_embeds=query_tokens,
@@ -208,7 +214,7 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         language_model_inputs = self.language_projection(query_outputs.last_hidden_state)
 
         if input_ids is None:
-            input_ids = torch.full((B, 1), self.config.text_config.bos_token_id, dtype=torch.long, device=pixel_values.device)
+            input_ids = torch.full((B_actual, 1), self.config.text_config.bos_token_id, dtype=torch.long, device=pixel_values.device)
         
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids)
