@@ -27,6 +27,7 @@ training_args:
   output_dir: "./checkpoints/stage2_qformer_pretrain"
   run_name: "stage2-qformer-pretrain"
   
+  fp16: false
   bf16: false
   # 2단계에 적합한 하이퍼파라미터
   num_train_epochs: 3
