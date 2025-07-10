@@ -14,7 +14,7 @@ from transformers import (
 from peft import get_peft_model, LoraConfig
 
 from src.models.surroundblip import SurroundBlip
-from src.dataset import QuIC360Dataset, data_collator # 사용자 정의 데이터셋, 경로는 실제 위치에 맞게 수정
+from dataset import QuIC360Dataset, data_collator # 사용자 정의 데이터셋, 경로는 실제 위치에 맞게 수정
 
 # ----------------------------------------------------------------
 # 1. 설정 로딩 및 병합 유틸리티 (변경 없음)
