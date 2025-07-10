@@ -27,6 +27,8 @@ custom_args:
 training_args:
   output_dir: "./checkpoints/stage1_vision_pretrain"
   run_name: "stage1-vision-pretrain"
+  fp16: false
+  bf16: false
   num_train_epochs: 5
   learning_rate: 1.0e-4
   eval_steps: 500
