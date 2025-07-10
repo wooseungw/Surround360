@@ -12,7 +12,6 @@ from transformers.models.blip_2.modeling_blip_2 import Blip2PreTrainedModel, Bli
 from transformers import BertModel
 from transformers.utils import logging
 
-# vicreg Loss 경로는 실제 프로젝트 구조에 맞게 수정해야 합니다.
 from ..loss.vicreg import VICRegLoss
 
 logger = logging.get_logger(__name__)
@@ -31,9 +30,11 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         qformer_config = BertConfig.from_dict(config.qformer_config.to_dict())
         self.qformer = Blip2QFormerModel(qformer_config)
         
-        # text_encoder는 cross-attention을 사용해야 하므로, config에 is_decoder=True를 명시
+        # ✨✨✨ [핵심 수정] ✨✨✨
+        # text_encoder는 cross-attention을 사용해야 하므로, config에 명시적으로 추가
         qformer_config_for_bert = deepcopy(qformer_config)
-        qformer_config_for_bert.is_decoder = True
+        qformer_config_for_bert.add_cross_attention = True # Cross-Attention 레이어 생성 활성화
+        qformer_config_for_bert.is_decoder = True        # 디코더로 작동함을 명시
         self.text_encoder = BertModel(qformer_config_for_bert, add_pooling_layer=False)
 
         # Language Model
@@ -58,6 +59,7 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
     def set_input_embeddings(self, value: nn.Module):
         self.language_model.set_input_embeddings(value)
 
+    # _reshape_vision_outputs_to_spatial, _compute_overlap_loss, _compute_generative_loss 는 변경 없음
     def _reshape_vision_outputs_to_spatial(self, vision_outputs: BaseModelOutput, B: int, P: int) -> Optional[Tuple[torch.Tensor, int, int]]:
         image_embeds = vision_outputs.last_hidden_state
         patch_embeds = image_embeds[:, 1:]
@@ -135,7 +137,6 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 return_dict=True,
-                # encoder_hidden_states를 제공하지 않으면 self-attention만 수행
             )
             image_feat_itc = F.normalize(image_features[:, 0, :], dim=-1)
             text_feat_itc = F.normalize(text_outputs_itc.last_hidden_state[:, 0, :], dim=-1)
@@ -181,7 +182,10 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
             return {"loss": total_loss, "loss_itc": loss_itc, "loss_itm": loss_itm, "loss_lm": loss_lm}
 
         if stage == "finetune":
+            # `generate`와 로직 통일
+            B_actual = image_features.shape[0] if P==1 else B
             language_model_inputs = self.language_projection(image_features)
+
             lm_outputs = self._compute_generative_loss(language_model_inputs, input_ids, attention_mask, labels, **kwargs)
             if not return_dict:
                 return (lm_outputs.loss, lm_outputs.logits) if lm_outputs.loss is not None else (lm_outputs.logits,)
@@ -199,11 +203,10 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
             raise ValueError(f"Expected pixel_values to be 4D or 5D, but got {pixel_values.ndim}D")
 
         image_embeds = self.vision_model(pixel_values=pixel_values_flat)[0]
-        image_attention_mask = torch.ones(image_embeds.size()[:-1], dtype=torch.long, device=image_embeds.device)
         
-        # `generate`에서는 배치 사이즈가 다를 수 있으므로 B를 다시 계산
-        B_actual = image_embeds.shape[0] if P==1 else B
+        B_actual = image_embeds.shape[0] if pixel_values.ndim == 4 else B
         query_tokens = self.query_tokens.expand(B_actual, -1, -1)
+        image_attention_mask = torch.ones(image_embeds.size()[:-1], dtype=torch.long, device=image_embeds.device)
         
         query_outputs = self.qformer(
             query_embeds=query_tokens,
