@@ -21,7 +21,7 @@ from transformers import (
 import wandb
 
 # 데이터셋 및 모델 임포트
-from dataset import QuIC360Dataset, data_collator
+from src.dataset import QuIC360Dataset, data_collator
 from src.models.panorama_llava import PanoramaLLaVA, PanoramaLLaVAConfig
 
 # --- 1. 로깅 설정 ---
