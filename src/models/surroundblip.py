@@ -5,14 +5,14 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from transformers import Blip2Config, AutoModelForCausalLM, AutoModelForSeq2SeqLM
+from transformers import Blip2Config, AutoModelForCausalLM, AutoModelForSeq2SeqLM, BertConfig
 from transformers.generation import GenerationMixin
 from transformers.modeling_outputs import BaseModelOutput
 from transformers.models.blip_2.modeling_blip_2 import Blip2PreTrainedModel, Blip2VisionModel, Blip2QFormerModel
 from transformers import BertModel
 from transformers.utils import logging
 
-# vicreg Loss 경로를 실제 프로젝트 구조에 맞게 수정해야 합니다.
+# vicreg Loss 경로는 실제 프로젝트 구조에 맞게 수정해야 합니다.
 from ..loss.vicreg import VICRegLoss
 
 logger = logging.get_logger(__name__)
@@ -26,18 +26,21 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         
         self.vision_model = Blip2VisionModel(config.vision_config)
         self.query_tokens = nn.Parameter(torch.zeros(1, config.num_query_tokens, config.qformer_config.hidden_size))
-        self.qformer = Blip2QFormerModel(config.qformer_config)
         
-        qformer_config_for_bert = deepcopy(config.qformer_config)
-        qformer_config_for_bert.type_vocab_size = 2
-        self.text_encoder = BertModel(qformer_config_for_bert, add_pooling_layer=False)
+        # Q-Former와 Text Encoder를 위한 설정
+        # Blip2QFormerConfig를 BertConfig로 변환하여 호환성 확보
+        qformer_config = BertConfig.from_dict(config.qformer_config.to_dict())
+        self.qformer = Blip2QFormerModel(qformer_config)
+        self.text_encoder = BertModel(qformer_config, add_pooling_layer=False)
 
+        # Language Model
         self.language_projection = nn.Linear(config.qformer_config.hidden_size, config.text_config.hidden_size)
         if config.use_decoder_only_language_model:
             self.language_model = AutoModelForCausalLM.from_config(config.text_config)
         else:
             self.language_model = AutoModelForSeq2SeqLM.from_config(config.text_config)
 
+        # Loss Modules
         self.vicreg_loss = VICRegLoss()
         self.temp = nn.Parameter(torch.ones([]) * config.temperature)
         self.itm_head = nn.Linear(config.qformer_config.hidden_size, 2)
@@ -56,7 +59,6 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         image_embeds = vision_outputs.last_hidden_state
         patch_embeds = image_embeds[:, 1:]
         num_patches = patch_embeds.shape[1]
-        
         try:
             H_p = W_p = int(num_patches**0.5)
             spatial_embeds = patch_embeds.reshape(B, P, H_p, W_p, -1)
@@ -103,7 +105,6 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
 
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        # ✨ [핵심 수정] 입력 텐서의 차원을 확인하여 유연하게 처리
         if pixel_values.ndim == 5:
             B, P, C, H, W = pixel_values.shape
             pixel_values_flat = pixel_values.view(B * P, C, H, W)
@@ -114,40 +115,29 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         else:
             raise ValueError(f"Expected pixel_values to be 4D or 5D, but got {pixel_values.ndim}D")
 
-        # =======================================================
-        # === 1단계: Vision Pre-training
-        # =======================================================
         if stage == "vision_pretrain":
             vision_outputs = self.vision_model(pixel_values=pixel_values_flat, output_hidden_states=True, return_dict=True)
             loss = self._compute_overlap_loss(vision_outputs, B, P, kwargs.get("overlap_consistency_weight", 1.0))
             return {"loss": loss}
 
-        # Vision 특징 추출 (2, 3단계 공통)
         image_embeds = self.vision_model(pixel_values=pixel_values_flat)[0]
         
-        # =======================================================
-        # === 2단계: Q-Former Pre-training (ITC, ITM, LM)
-        # =======================================================
+        query_tokens_expanded = self.query_tokens.expand(image_embeds.shape[0], -1, -1)
+        image_outputs = self.qformer(query_embeds=query_tokens_expanded, encoder_hidden_states=image_embeds, return_dict=True)
+        image_features = image_outputs.last_hidden_state
+
         if stage == "qformer_pretrain":
-            query_tokens = self.query_tokens.expand(B, -1, -1)
-            
-            # 1. 이미지 특징 인코딩 (by Q-Former)
-            image_outputs = self.qformer(query_embeds=query_tokens, encoder_hidden_states=image_embeds, return_dict=True)
-            image_features = image_outputs.last_hidden_state
-
-            # 2. 텍스트 특징 인코딩 (by Text Encoder)
-            text_outputs = self.text_encoder(input_ids=input_ids, attention_mask=attention_mask, return_dict=True)
-            text_features = text_outputs.last_hidden_state
-
-            # 3. ITC Loss
+            # 1. ITC Loss
+            text_outputs_itc = self.text_encoder(input_ids=input_ids, attention_mask=attention_mask, return_dict=True)
             image_feat_itc = F.normalize(image_features[:, 0, :], dim=-1)
-            text_feat_itc = F.normalize(text_features[:, 0, :], dim=-1)
+            text_feat_itc = F.normalize(text_outputs_itc.last_hidden_state[:, 0, :], dim=-1)
+            
             sim_i2t = torch.matmul(image_feat_itc, text_feat_itc.t()) * self.temp
             sim_t2i = torch.matmul(text_feat_itc, image_feat_itc.t()) * self.temp
             targets = torch.arange(B, device=pixel_values.device)
             loss_itc = (F.cross_entropy(sim_i2t, targets) + F.cross_entropy(sim_t2i, targets)) / 2
             
-            # 4. ITM Loss
+            # 2. ITM Loss (원본 BLIP-2 방식)
             with torch.no_grad():
                 weights = sim_i2t.clone()
                 weights.fill_diagonal_(-1e9)
@@ -155,44 +145,43 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
 
             input_ids_neg = input_ids[neg_indices]
             attention_mask_neg = attention_mask[neg_indices]
-            
-            neg_text_outputs = self.text_encoder(input_ids=input_ids_neg, attention_mask=attention_mask_neg, return_dict=True)
-            text_features_all = torch.cat([text_features, neg_text_outputs.last_hidden_state], dim=0)
-            text_attention_mask_all = torch.cat([attention_mask, attention_mask_neg], dim=0)
-            image_features_repeated = image_features.repeat(2, 1, 1)
 
-            itm_outputs = self.qformer(query_embeds=image_features_repeated, encoder_hidden_states=text_features_all, encoder_attention_mask=text_attention_mask_all, return_dict=True)
+            input_ids_all = torch.cat([input_ids, input_ids_neg], dim=0)
+            attention_mask_all = torch.cat([attention_mask, attention_mask_neg], dim=0)
+            
+            # 텍스트 임베딩을 Q-Former의 Query로 사용
+            text_embeds_all = self.text_encoder.embeddings(input_ids=input_ids_all)
+            
+            # 이미지 특징을 Q-Former의 Context(encoder_hidden_states)로 사용
+            image_features_all = image_features.repeat(2, 1, 1)
+            image_attention_mask_all = torch.ones(image_features_all.size()[:-1], dtype=torch.long, device=image_features_all.device)
+
+            itm_outputs = self.qformer(
+                query_embeds=text_embeds_all,
+                attention_mask=attention_mask_all,
+                encoder_hidden_states=image_features_all,
+                encoder_attention_mask=image_attention_mask_all,
+                return_dict=True
+            )
+            
             itm_logits = self.itm_head(itm_outputs.last_hidden_state[:, 0, :])
             itm_labels = torch.cat([torch.ones(B, dtype=torch.long), torch.zeros(B, dtype=torch.long)], dim=0).to(itm_logits.device)
             loss_itm = F.cross_entropy(itm_logits, itm_labels)
-
-            # 5. LM Loss (by external Language Model)
+            
+            # 3. LM Loss
             language_model_inputs = self.language_projection(image_features)
             lm_outputs = self._compute_generative_loss(language_model_inputs, input_ids, attention_mask, labels, **kwargs)
             loss_lm = lm_outputs['loss']
-
+            
             total_loss = loss_itc + loss_itm + loss_lm
             return {"loss": total_loss, "loss_itc": loss_itc, "loss_itm": loss_itm, "loss_lm": loss_lm}
 
-        # =======================================================
-        # === 3단계: Instruction Fine-tuning
-        # =======================================================
         if stage == "finetune":
-            query_tokens = self.query_tokens.expand(B, -1, -1)
-            image_attention_mask_for_qformer = torch.ones(image_embeds.size()[:-1], dtype=torch.long, device=image_embeds.device)
-            
-            query_outputs = self.qformer(query_embeds=query_tokens, encoder_hidden_states=image_embeds, encoder_attention_mask=image_attention_mask_for_qformer, return_dict=True)
-            language_model_inputs = self.language_projection(query_outputs.last_hidden_state)
-            
+            language_model_inputs = self.language_projection(image_features)
             lm_outputs = self._compute_generative_loss(language_model_inputs, input_ids, attention_mask, labels, **kwargs)
-
             if not return_dict:
                 return (lm_outputs.loss, lm_outputs.logits) if lm_outputs.loss is not None else (lm_outputs.logits,)
-
-            return {
-                "loss": lm_outputs.loss,
-                "logits": lm_outputs.logits,
-            }
+            return {"loss": lm_outputs.loss, "logits": lm_outputs.logits}
 
     @torch.no_grad()
     def generate(self, pixel_values: torch.FloatTensor, input_ids: Optional[torch.LongTensor] = None, attention_mask: Optional[torch.LongTensor] = None, **generate_kwargs) -> torch.LongTensor:
@@ -200,8 +189,7 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
             B, P, C, H, W = pixel_values.shape
             pixel_values_flat = pixel_values.view(B * P, C, H, W)
         elif pixel_values.ndim == 4:
-            B, C, H, W = pixel_values.shape
-            P = 1
+            B, _, _, _ = pixel_values.shape
             pixel_values_flat = pixel_values
         else:
             raise ValueError(f"Expected pixel_values to be 4D or 5D, but got {pixel_values.ndim}D")
@@ -211,7 +199,12 @@ class SurroundBlip(Blip2PreTrainedModel, GenerationMixin):
         
         query_tokens = self.query_tokens.expand(B, -1, -1)
         
-        query_outputs = self.qformer(query_embeds=query_tokens, encoder_hidden_states=image_embeds, encoder_attention_mask=image_attention_mask, return_dict=True)
+        query_outputs = self.qformer(
+            query_embeds=query_tokens,
+            encoder_hidden_states=image_embeds,
+            encoder_attention_mask=image_attention_mask,
+            return_dict=True
+        )
         language_model_inputs = self.language_projection(query_outputs.last_hidden_state)
 
         if input_ids is None:

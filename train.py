@@ -75,6 +75,10 @@ def train(config: dict):
     pprint(config)
     print("-----------------------")
 
+    # --- TF32 비활성화 (CUDA 호환성 문제 방지) ---
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+
     # --- 프로세서 로딩 ---
     processor = Blip2Processor.from_pretrained(config['model']['model_name_or_path'])
     
@@ -109,18 +113,14 @@ def train(config: dict):
         else:
             print(f"Warning: Checkpoint path not found: {checkpoint_path}")
 
-    # --- [✨✨✨ 핵심 수정] 모든 관련 임베딩 레이어 리사이즈 ---
+    # --- 모든 관련 임베딩 레이어 리사이즈 ---
     print("Synchronizing tokenizer and all model vocab sizes...")
     tokenizer_vocab_size = len(processor.tokenizer)
 
-    # 1. Text Encoder의 임베딩 리사이즈
-    # text_encoder의 원래 vocab_size와 다를 경우에만 리사이즈
     if model.text_encoder.config.vocab_size != tokenizer_vocab_size:
         print(f"Resizing text_encoder's embeddings: {model.text_encoder.config.vocab_size} -> {tokenizer_vocab_size}")
         model.text_encoder.resize_token_embeddings(tokenizer_vocab_size)
     
-    # 2. Language Model의 임베딩 리사이즈
-    # get_input_embeddings()는 language_model의 임베딩을 가리킴
     if model.get_input_embeddings().weight.shape[0] != tokenizer_vocab_size:
         print(f"Resizing language_model's embeddings: {model.get_input_embeddings().weight.shape[0]} -> {tokenizer_vocab_size}")
         model.resize_token_embeddings(tokenizer_vocab_size)
