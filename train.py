@@ -47,7 +47,8 @@ class StageAwareTrainer(Trainer):
         self.stage_name = stage_name
         self.custom_args = custom_args if custom_args is not None else {}
     
-    def compute_loss(self, model, inputs, return_outputs=False):
+    # ✨✨✨ [핵심 수정] **kwargs를 추가하여 예상치 못한 인자를 받을 수 있도록 변경 ✨✨✨
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         inputs["stage"] = self.stage_name
         # loss_specific_args와 같이 custom_args 아래에 있는 인자들을 모델에 전달
         inputs.update(self.custom_args.get('loss_specific_args', {}))
