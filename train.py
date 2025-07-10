@@ -9,11 +9,10 @@ from transformers import (
     Trainer,
     Blip2Processor,
     Blip2Config,
-    Blip2ForConditionalGeneration # ✨ 공식 모델 로드를 위해 추가
+    Blip2ForConditionalGeneration
 )
 from peft import get_peft_model, LoraConfig
 
-# 사용자 정의 모듈 경로는 실제 프로젝트 구조에 맞게 수정해야 합니다.
 from src.models.surroundblip import SurroundBlip
 from src.dataset import QuIC360Dataset, data_collator
 
@@ -47,10 +46,8 @@ class StageAwareTrainer(Trainer):
         self.stage_name = stage_name
         self.custom_args = custom_args if custom_args is not None else {}
     
-    # ✨✨✨ [핵심 수정] **kwargs를 추가하여 예상치 못한 인자를 받을 수 있도록 변경 ✨✨✨
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         inputs["stage"] = self.stage_name
-        # loss_specific_args와 같이 custom_args 아래에 있는 인자들을 모델에 전달
         inputs.update(self.custom_args.get('loss_specific_args', {}))
         
         outputs = model(**inputs)
@@ -81,7 +78,7 @@ def train(config: dict):
     # --- 프로세서 로딩 ---
     processor = Blip2Processor.from_pretrained(config['model']['model_name_or_path'])
     
-    # --- [✨ 핵심] 사전 학습된 모듈 이식 및 가중치 공유 ---
+    # --- 사전 학습된 모듈 이식 및 가중치 공유 ---
     print("Loading official BLIP-2 model to extract pre-trained components...")
     official_blip2_model = Blip2ForConditionalGeneration.from_pretrained(config['model']['model_name_or_path'])
 
@@ -90,13 +87,11 @@ def train(config: dict):
     model = SurroundBlip(model_config)
 
     print("Transplanting pre-trained weights to custom model...")
-    # 1. 주요 모듈 이식
     model.vision_model = official_blip2_model.vision_model
     model.qformer = official_blip2_model.qformer
     model.language_projection = official_blip2_model.language_projection
     
     print("Sharing weights from Q-Former to Text Encoder...")
-    # 2. Q-Former의 가중치를 순수 텍스트 인코더에 복사하여 공유
     model.text_encoder.load_state_dict(model.qformer.state_dict(), strict=False)
     
     del official_blip2_model
@@ -114,17 +109,25 @@ def train(config: dict):
         else:
             print(f"Warning: Checkpoint path not found: {checkpoint_path}")
 
-    # --- 토큰 임베딩 동기화 ---
-    print("Synchronizing tokenizer and model vocab size...")
-    model_embedding_size = model.get_input_embeddings().weight.shape[0]
+    # --- [✨✨✨ 핵심 수정] 모든 관련 임베딩 레이어 리사이즈 ---
+    print("Synchronizing tokenizer and all model vocab sizes...")
     tokenizer_vocab_size = len(processor.tokenizer)
-    if model_embedding_size != tokenizer_vocab_size:
-        print(f"Resizing model token embeddings: {model_embedding_size} -> {tokenizer_vocab_size}")
-        model.resize_token_embeddings(tokenizer_vocab_size)
-    else:
-        print("Vocab sizes are synchronized.")
+
+    # 1. Text Encoder의 임베딩 리사이즈
+    # text_encoder의 원래 vocab_size와 다를 경우에만 리사이즈
+    if model.text_encoder.config.vocab_size != tokenizer_vocab_size:
+        print(f"Resizing text_encoder's embeddings: {model.text_encoder.config.vocab_size} -> {tokenizer_vocab_size}")
+        model.text_encoder.resize_token_embeddings(tokenizer_vocab_size)
     
-    # --- 모델 레이어 동결 (안정성 강화 로직) ---
+    # 2. Language Model의 임베딩 리사이즈
+    # get_input_embeddings()는 language_model의 임베딩을 가리킴
+    if model.get_input_embeddings().weight.shape[0] != tokenizer_vocab_size:
+        print(f"Resizing language_model's embeddings: {model.get_input_embeddings().weight.shape[0]} -> {tokenizer_vocab_size}")
+        model.resize_token_embeddings(tokenizer_vocab_size)
+        
+    print("All vocab sizes are synchronized.")
+    
+    # --- 모델 레이어 동결 ---
     freeze_modules = config['model'].get('freeze_modules', [])
     if freeze_modules:
         print(f"Freezing modules: {freeze_modules}")
@@ -146,7 +149,6 @@ def train(config: dict):
     print_trainable_parameters(model)
 
     # --- 데이터셋 로딩 ---
-    # 실제 데이터셋 클래스와 인자는 프로젝트에 맞게 수정
     train_dataset = QuIC360Dataset(config['data']['train_csv_path'], processor, max_length=config['data']['max_length'])
     eval_dataset = QuIC360Dataset(config['data']['valid_csv_path'], processor, max_length=config['data']['max_length'])
 
@@ -154,7 +156,6 @@ def train(config: dict):
     print("Initializing Trainer...")
     training_args_dict = config.get('training_args', {})
     custom_args_dict = config.get('custom_args', {})
-    
     training_args = TrainingArguments(**training_args_dict)
     
     trainer = StageAwareTrainer(
@@ -175,7 +176,7 @@ def train(config: dict):
     output_dir = training_args.output_dir
     os.makedirs(output_dir, exist_ok=True)
     processor.save_pretrained(output_dir)
-    trainer.save_model(output_dir) # PEFT/LoRA 여부와 관계없이 trainer.save_model()이 안전하게 처리
+    trainer.save_model(output_dir)
     print(f"Model and processor saved to {output_dir}")
 
 # ----------------------------------------------------------------
