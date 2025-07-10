@@ -13,6 +13,7 @@ from transformers import (
 )
 from peft import get_peft_model, LoraConfig
 
+# 사용자 정의 모듈 경로는 실제 프로젝트 구조에 맞게 수정해야 합니다.
 from src.models.surroundblip import SurroundBlip
 from src.dataset import QuIC360Dataset, data_collator
 
@@ -20,6 +21,9 @@ from src.dataset import QuIC360Dataset, data_collator
 # 1. 설정 로딩 및 병합 유틸리티
 # ----------------------------------------------------------------
 def deep_merge_dict(base_dict, new_dict):
+    """
+    중첩된 딕셔너리를 재귀적으로 병합합니다.
+    """
     for key, value in new_dict.items():
         if isinstance(value, dict) and key in base_dict and isinstance(base_dict[key], dict):
             base_dict[key] = deep_merge_dict(base_dict[key], value)
@@ -28,6 +32,9 @@ def deep_merge_dict(base_dict, new_dict):
     return base_dict
 
 def load_and_merge_configs(stage_config_path: str, base_config_path: str = 'configs/base.yaml'):
+    """
+    기본 설정과 스테이지 설정을 불러와 병합합니다.
+    """
     print(f"Loading base configuration from: {base_config_path}")
     with open(base_config_path, 'r') as f:
         config = yaml.safe_load(f)
@@ -41,12 +48,19 @@ def load_and_merge_configs(stage_config_path: str, base_config_path: str = 'conf
 # 2. 커스텀 Trainer
 # ----------------------------------------------------------------
 class StageAwareTrainer(Trainer):
+    """
+    모델의 forward 메소드에 'stage' 및 사용자 정의 인자를 전달하는 커스텀 Trainer.
+    """
     def __init__(self, *args, stage_name: str, custom_args: dict = None, **kwargs):
         super().__init__(*args, **kwargs)
         self.stage_name = stage_name
         self.custom_args = custom_args if custom_args is not None else {}
     
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        """
+        Trainer의 내부 로직과 호환되도록 **kwargs를 추가하고,
+        모델에 필요한 인자들을 주입합니다.
+        """
         inputs["stage"] = self.stage_name
         inputs.update(self.custom_args.get('loss_specific_args', {}))
         
@@ -59,6 +73,9 @@ class StageAwareTrainer(Trainer):
 # 3. 학습 가능한 파라미터 출력 유틸리티
 # ----------------------------------------------------------------
 def print_trainable_parameters(model):
+    """
+    모델의 학습 가능한 파라미터 수와 비율을 출력합니다.
+    """
     trainable_params, all_param = 0, 0
     for _, param in model.named_parameters():
         all_param += param.numel()
@@ -71,11 +88,14 @@ def print_trainable_parameters(model):
 # 4. 메인 학습 함수
 # ----------------------------------------------------------------
 def train(config: dict):
+    """
+    설정 딕셔너리를 받아 전체 학습 파이프라인을 실행합니다.
+    """
     print("--- Configuration ---")
     pprint(config)
     print("-----------------------")
 
-    # --- TF32 비활성화 (CUDA 호환성 문제 방지) ---
+    # --- TF32 비활성화 (CUDA 호환성 및 안정성 향상) ---
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
 
@@ -176,7 +196,7 @@ def train(config: dict):
     output_dir = training_args.output_dir
     os.makedirs(output_dir, exist_ok=True)
     processor.save_pretrained(output_dir)
-    trainer.save_model(output_dir)
+    trainer.save_model(output_dir) # PEFT/LoRA 여부와 관계없이 trainer.save_model()이 안전하게 처리
     print(f"Model and processor saved to {output_dir}")
 
 # ----------------------------------------------------------------

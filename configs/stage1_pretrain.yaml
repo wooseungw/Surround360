@@ -8,7 +8,7 @@ wandb:
 model:
   load_from_checkpoint: null
   freeze_modules:
-    - 'qformer'
+    - 'text_encoder'
     - 'language_projection'
     - 'language_model'
     - 'itm_head'

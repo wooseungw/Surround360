@@ -9,7 +9,6 @@ model:
   load_from_checkpoint: null
   freeze_modules:
     - 'qformer'
-    - 'language_projection'
     - 'text_encoder'
     - 'language_model'
     - 'itm_head'
