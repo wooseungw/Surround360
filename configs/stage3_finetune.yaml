@@ -11,7 +11,10 @@ model:
   
   # 전체 파라미터를 미세 조정할 경우 빈 리스트로 설정
   # LoRA 사용 시에는 아래 use_lora: true로 제어
-  freeze_modules: [] 
+  freeze_modules: 
+    - 'vision_model'  # 비전 모델은 고정
+    - 'text_encoder'  # Q-Former와 LLM은 고정
+    
   
   # LoRA (PEFT)를 사용한 효율적 미세 조정
   use_lora: true

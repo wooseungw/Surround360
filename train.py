@@ -9,15 +9,16 @@ from transformers import (
     Trainer,
     Blip2Processor,
     Blip2Config,
-    Blip2ForConditionalGeneration, # ✨ 공식 모델 로드를 위해 추가
+    Blip2ForConditionalGeneration # ✨ 공식 모델 로드를 위해 추가
 )
 from peft import get_peft_model, LoraConfig
 
+# 사용자 정의 모듈 경로는 실제 프로젝트 구조에 맞게 수정해야 합니다.
 from src.models.surroundblip import SurroundBlip
-from dataset import QuIC360Dataset, data_collator # 사용자 정의 데이터셋, 경로는 실제 위치에 맞게 수정
+from src.dataset import QuIC360Dataset, data_collator
 
 # ----------------------------------------------------------------
-# 1. 설정 로딩 및 병합 유틸리티 (변경 없음)
+# 1. 설정 로딩 및 병합 유틸리티
 # ----------------------------------------------------------------
 def deep_merge_dict(base_dict, new_dict):
     for key, value in new_dict.items():
@@ -38,7 +39,7 @@ def load_and_merge_configs(stage_config_path: str, base_config_path: str = 'conf
     return config
 
 # ----------------------------------------------------------------
-# 2. 커스텀 Trainer (개선된 방식 반영)
+# 2. 커스텀 Trainer
 # ----------------------------------------------------------------
 class StageAwareTrainer(Trainer):
     def __init__(self, *args, stage_name: str, custom_args: dict = None, **kwargs):
@@ -52,12 +53,12 @@ class StageAwareTrainer(Trainer):
         inputs.update(self.custom_args.get('loss_specific_args', {}))
         
         outputs = model(**inputs)
-        loss = outputs["loss"]
+        loss = outputs.get("loss")
         
         return (loss, outputs) if return_outputs else loss
 
 # ----------------------------------------------------------------
-# 3. 학습 가능한 파라미터 출력 유틸리티 (변경 없음)
+# 3. 학습 가능한 파라미터 출력 유틸리티
 # ----------------------------------------------------------------
 def print_trainable_parameters(model):
     trainable_params, all_param = 0, 0
@@ -69,7 +70,7 @@ def print_trainable_parameters(model):
           f"trainable%: {100 * trainable_params / all_param:.2f}")
 
 # ----------------------------------------------------------------
-# 4. 메인 학습 함수 (최종 수정본)
+# 4. 메인 학습 함수
 # ----------------------------------------------------------------
 def train(config: dict):
     print("--- Configuration ---")
@@ -79,7 +80,7 @@ def train(config: dict):
     # --- 프로세서 로딩 ---
     processor = Blip2Processor.from_pretrained(config['model']['model_name_or_path'])
     
-    # --- [✨ 핵심] 사전 학습된 모듈 이식 ---
+    # --- [✨ 핵심] 사전 학습된 모듈 이식 및 가중치 공유 ---
     print("Loading official BLIP-2 model to extract pre-trained components...")
     official_blip2_model = Blip2ForConditionalGeneration.from_pretrained(config['model']['model_name_or_path'])
 
@@ -88,14 +89,19 @@ def train(config: dict):
     model = SurroundBlip(model_config)
 
     print("Transplanting pre-trained weights to custom model...")
+    # 1. 주요 모듈 이식
     model.vision_model = official_blip2_model.vision_model
     model.qformer = official_blip2_model.qformer
     model.language_projection = official_blip2_model.language_projection
     
+    print("Sharing weights from Q-Former to Text Encoder...")
+    # 2. Q-Former의 가중치를 순수 텍스트 인코더에 복사하여 공유
+    model.text_encoder.load_state_dict(model.qformer.state_dict(), strict=False)
+    
     del official_blip2_model
     torch.cuda.empty_cache()
 
-    # --- [✨ 핵심] 스테이지별 체크포인트 로드 (이식 후) ---
+    # --- 스테이지별 체크포인트 로드 (이식 후) ---
     if config['model']['load_from_checkpoint']:
         print(f"Loading stage-specific checkpoint from: {config['model']['load_from_checkpoint']}")
         checkpoint_path = os.path.join(config['model']['load_from_checkpoint'], "pytorch_model.bin")
@@ -107,7 +113,7 @@ def train(config: dict):
         else:
             print(f"Warning: Checkpoint path not found: {checkpoint_path}")
 
-    # --- [✨ 핵심] 토큰 임베딩 동기화 및 동결 (안정성 강화 로직) ---
+    # --- 토큰 임베딩 동기화 ---
     print("Synchronizing tokenizer and model vocab size...")
     model_embedding_size = model.get_input_embeddings().weight.shape[0]
     tokenizer_vocab_size = len(processor.tokenizer)
@@ -132,13 +138,14 @@ def train(config: dict):
     # --- LoRA/PEFT 적용 ---
     if config['model'].get('use_lora', False):
         print("Setting up LoRA/PEFT...")
-        lora_config = config['model']['lora_config']
-        peft_config = LoraConfig(**lora_config, task_type="CAUSAL_LM") # SEQ_2_SEQ_LM
+        lora_config_dict = config['model']['lora_config']
+        peft_config = LoraConfig(**lora_config_dict)
         model = get_peft_model(model, peft_config)
 
     print_trainable_parameters(model)
 
     # --- 데이터셋 로딩 ---
+    # 실제 데이터셋 클래스와 인자는 프로젝트에 맞게 수정
     train_dataset = QuIC360Dataset(config['data']['train_csv_path'], processor, max_length=config['data']['max_length'])
     eval_dataset = QuIC360Dataset(config['data']['valid_csv_path'], processor, max_length=config['data']['max_length'])
 
@@ -165,12 +172,13 @@ def train(config: dict):
     # --- 최종 모델 및 프로세서 저장 ---
     print("Training finished. Saving final model and processor.")
     output_dir = training_args.output_dir
+    os.makedirs(output_dir, exist_ok=True)
     processor.save_pretrained(output_dir)
     trainer.save_model(output_dir) # PEFT/LoRA 여부와 관계없이 trainer.save_model()이 안전하게 처리
     print(f"Model and processor saved to {output_dir}")
 
 # ----------------------------------------------------------------
-# 5. 스크립트 실행 블록 (변경 없음)
+# 5. 스크립트 실행 블록
 # ----------------------------------------------------------------
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

@@ -14,6 +14,7 @@ model:
   # Vision Encoder와 LLM은 고정하고 Q-Former 관련 모듈만 학습
   freeze_modules:
     - 'vision_model'
+    - 'text_encoder'
     - 'language_model'
 
 data:
